@@ -143,6 +143,14 @@ class _RoomPageState extends State<RoomPage> {
       const String.fromEnvironment('WS_URL', defaultValue: 'wss://signal.qaxp.com/ws');
   WebSocketChannel? _channel;
 
+  String _endpointForRoom(String room) {
+    final base = _wsEndpoint;
+    if (base.contains('{room}')) {
+      return base.replaceAll('{room}', Uri.encodeComponent(room));
+    }
+    return base; // payload-based room selection
+  }
+
   RTCPeerConnection? _pc;
   MediaStream? _localStream;
   MediaStream? _remoteStream;
@@ -159,6 +167,12 @@ class _RoomPageState extends State<RoomPage> {
   List<MediaDeviceInfo> _videoInputs = [];
   String? _selectedMicId;
   String? _selectedCamId;
+
+  void _debug(String message) {
+    if (kDebugMode) {
+      print('[meet] ' + message);
+    }
+  }
 
   @override
   void initState() {
@@ -215,6 +229,13 @@ class _RoomPageState extends State<RoomPage> {
     };
     _pc = await createPeerConnection(configuration);
 
+    _pc!.onIceConnectionState = (RTCIceConnectionState state) {
+      _debug('ICE state: ' + state.toString());
+    };
+    _pc!.onConnectionState = (RTCPeerConnectionState state) {
+      _debug('PC state: ' + state.toString());
+    };
+
     // Add local tracks
     final local = _localStream;
     if (local != null) {
@@ -225,6 +246,7 @@ class _RoomPageState extends State<RoomPage> {
 
     // Remote track handler (Unified Plan)
     _pc!.onTrack = (RTCTrackEvent event) async {
+      _debug('onTrack kind=' + (event.track?.kind ?? 'unknown') + ' streams=' + event.streams.length.toString());
       MediaStream? stream;
       if (event.streams.isNotEmpty) {
         stream = event.streams.first;
@@ -243,46 +265,58 @@ class _RoomPageState extends State<RoomPage> {
 
     // Plan-B fallback (some browsers/servers)
     _pc!.onAddStream = (MediaStream stream) {
+      _debug('onAddStream id=' + stream.id);
       _remoteRenderer.srcObject = stream;
       setState(() => _peerJoined = true);
     };
 
     // ICE candidate handler: send to signaling server
     _pc!.onIceCandidate = (RTCIceCandidate candidate) {
-      if (_channel != null) {
-        _send({
-          'type': 'ice',
+      if (_channel != null && (candidate.candidate?.isNotEmpty ?? false)) {
+        final payload = {
+          'type': 'candidate',
           'room': widget.roomName,
           'candidate': {
             'candidate': candidate.candidate,
             'sdpMid': candidate.sdpMid,
             'sdpMLineIndex': candidate.sdpMLineIndex,
           },
-        });
+        };
+        _debug('send ICE');
+        _send(payload);
       }
     };
 
     // Connect to signaling server via WebSocket
     try {
-      _channel = WebSocketChannel.connect(Uri.parse(_wsEndpoint));
-    } catch (_) {
+      final url = _endpointForRoom(widget.roomName);
+      _debug('Connecting WS: ' + url);
+      _channel = WebSocketChannel.connect(Uri.parse(url));
+    } catch (e) {
+      _debug('WS connect error: ' + e.toString());
       // If connection fails, keep local preview
       return;
     }
 
     // Join the room
+    _debug('Join room: ' + widget.roomName);
     _send({'type': 'join', 'room': widget.roomName});
 
     // Handle messages
     _channel!.stream.listen((dynamic data) async {
       Map<String, dynamic> msg;
       try {
-        msg = data is String ? jsonDecode(data) : (data as Map<String, dynamic>);
-      } catch (_) {
+        final text = data is String ? data.trim() : (data as String);
+        msg = jsonDecode(text);
+      } catch (e) {
+        _debug('WS recv non-JSON or parse error: ' + e.toString());
         return;
       }
 
-      switch (msg['type']) {
+      final type = (msg['type'] ?? '').toString();
+      _debug('recv: ' + type);
+
+      switch (type) {
         case 'peer-joined':
         case 'ready':
         case 'nudge':
@@ -294,8 +328,11 @@ class _RoomPageState extends State<RoomPage> {
 
         case 'offer':
           {
-            final sdp = msg['sdp'] as String?;
+            String? sdp = msg['sdp'] as String?;
+            // Fallback for nested offer objects
+            sdp ??= (msg['offer'] is Map ? (msg['offer']['sdp'] as String?) : null);
             if (sdp == null || _pc == null) break;
+            _debug('setRemoteDescription(offer)');
             await _pc!.setRemoteDescription(RTCSessionDescription(sdp, 'offer'));
             // Flush any pending ICE received before remote description was set
             for (final cand in _pendingIce) {
@@ -309,14 +346,18 @@ class _RoomPageState extends State<RoomPage> {
 
             final answer = await _pc!.createAnswer();
             await _pc!.setLocalDescription(answer);
+            _debug('send answer');
             _send({'type': 'answer', 'room': widget.roomName, 'sdp': answer.sdp});
           }
           break;
 
         case 'answer':
           {
-            final sdp = msg['sdp'] as String?;
+            String? sdp = msg['sdp'] as String?;
+            // Fallback for nested answer objects
+            sdp ??= (msg['answer'] is Map ? (msg['answer']['sdp'] as String?) : null);
             if (sdp == null || _pc == null) break;
+            _debug('setRemoteDescription(answer)');
             await _pc!.setRemoteDescription(RTCSessionDescription(sdp, 'answer'));
             // Flush pending ICE
             for (final cand in _pendingIce) {
@@ -333,12 +374,24 @@ class _RoomPageState extends State<RoomPage> {
         case 'ice':
         case 'candidate':
           {
-            final cand = msg['candidate'] as Map<String, dynamic>?;
+            final candAny = msg['candidate'];
+            Map<String, dynamic>? cand;
+            if (candAny is Map<String, dynamic>) {
+              cand = candAny;
+            } else if (candAny is String) {
+              cand = {
+                'candidate': candAny,
+                'sdpMid': msg['sdpMid'],
+                'sdpMLineIndex': msg['sdpMLineIndex'],
+              };
+            }
             if (cand == null || _pc == null) break;
             final remoteDesc = await _pc!.getRemoteDescription();
             if (remoteDesc == null) {
+              _debug('buffer ICE');
               _pendingIce.add(cand);
             } else {
+              _debug('add ICE');
               await _pc!.addCandidate(RTCIceCandidate(
                 cand['candidate'] as String?,
                 cand['sdpMid'] as String?,
@@ -359,8 +412,10 @@ class _RoomPageState extends State<RoomPage> {
           break;
       }
     }, onDone: () {
+      _debug('WS closed');
       // Channel closed – keep local preview
     }, onError: (e) {
+      _debug('WS error: ' + e.toString());
       // Errors – keep local preview
     });
   }
@@ -370,13 +425,16 @@ class _RoomPageState extends State<RoomPage> {
     // Create and send offer
     final offer = await _pc!.createOffer();
     await _pc!.setLocalDescription(offer);
+    _debug('send offer');
     _send({'type': 'offer', 'room': widget.roomName, 'sdp': offer.sdp});
   }
 
   void _send(Map<String, dynamic> msg) {
     try {
       _channel?.sink.add(jsonEncode(msg));
-    } catch (_) {}
+    } catch (e) {
+      _debug('WS send error: ' + e.toString());
+    }
   }
 
   Future<void> _toggleMic() async {
