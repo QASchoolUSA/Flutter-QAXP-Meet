@@ -1,5 +1,5 @@
 # Stage 1: Build Flutter web
-FROM ghcr.io/cirruslabs/flutter:3.24.3 AS build
+FROM ghcr.io/cirruslabs/flutter:3.35.6 AS build
 # CirrusLabs images are multi-arch; 3.24.x bundles Dart 3.9.x
 WORKDIR /app
 
