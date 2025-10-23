@@ -1,0 +1,4 @@
+# Upload only the prebuilt web assets and config
+*
+!build/web/**
+!vercel.json

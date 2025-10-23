@@ -1,0 +1,10 @@
+{
+  "version": 2,
+  "builds": [
+    { "src": "build/web/**", "use": "@vercel/static" }
+  ],
+  "routes": [
+    { "src": "/(assets/.*|icons/.*|favicon\\.png|manifest\\.json|flutter\\.js|flutter_bootstrap\\.js)", "dest": "/$1" },
+    { "src": "/(.*)", "dest": "/index.html" }
+  ]
+}
