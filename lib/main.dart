@@ -281,6 +281,10 @@ class _RoomPageState extends State<RoomPage> {
             'sdpMid': candidate.sdpMid,
             'sdpMLineIndex': candidate.sdpMLineIndex,
           },
+          // Alternate shape some servers expect
+          'ice': candidate.candidate,
+          'sdpMid': candidate.sdpMid,
+          'sdpMLineIndex': candidate.sdpMLineIndex,
         };
         _debug('send ICE');
         _send(payload);
@@ -347,7 +351,16 @@ class _RoomPageState extends State<RoomPage> {
             final answer = await _pc!.createAnswer();
             await _pc!.setLocalDescription(answer);
             _debug('send answer');
-            _send({'type': 'answer', 'room': widget.roomName, 'sdp': answer.sdp});
+            _send({
+              'type': 'answer',
+              'room': widget.roomName,
+              'sdp': answer.sdp,
+              // Fallback nested structure some servers require
+              'answer': {
+                'type': 'answer',
+                'sdp': answer.sdp,
+              }
+            });
           }
           break;
 
@@ -426,7 +439,16 @@ class _RoomPageState extends State<RoomPage> {
     final offer = await _pc!.createOffer();
     await _pc!.setLocalDescription(offer);
     _debug('send offer');
-    _send({'type': 'offer', 'room': widget.roomName, 'sdp': offer.sdp});
+    _send({
+      'type': 'offer',
+      'room': widget.roomName,
+      'sdp': offer.sdp,
+      // Fallback nested structure some servers require
+      'offer': {
+        'type': 'offer',
+        'sdp': offer.sdp,
+      }
+    });
   }
 
   void _send(Map<String, dynamic> msg) {
