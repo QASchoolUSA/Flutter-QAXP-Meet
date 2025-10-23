@@ -126,7 +126,14 @@ class RoomPage extends StatefulWidget {
 }
 
 class _RoomPageState extends State<RoomPage> {
-  static const String wsUrl = 'ws://localhost:8080';
+  String get _wsEndpoint {
+    const String env = String.fromEnvironment('WS_URL', defaultValue: '');
+    if (env.isNotEmpty) return env;
+    final base = Uri.base;
+    final scheme = base.scheme == 'https' ? 'wss' : 'ws';
+    final port = base.hasPort ? ':${base.port}' : '';
+    return '$scheme://${base.host}$port';
+  }
 
   final RTCVideoRenderer _localRenderer = RTCVideoRenderer();
   final RTCVideoRenderer _remoteRenderer = RTCVideoRenderer();
@@ -193,7 +200,7 @@ class _RoomPageState extends State<RoomPage> {
 
   Future<void> _setupSignalingAndRTC() async {
     // Connect signaling
-    _channel = WebSocketChannel.connect(Uri.parse(wsUrl));
+    _channel = WebSocketChannel.connect(Uri.parse(_wsEndpoint));
     _channel!.sink.add(jsonEncode({'type': 'join', 'room': widget.roomName}));
 
     // Create PeerConnection

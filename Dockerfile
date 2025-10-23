@@ -1,0 +1,30 @@
+# Stage 1: Build Flutter web
+FROM ghcr.io/cirruslabs/flutter:3.24.3 AS build
+# CirrusLabs images are multi-arch; 3.24.x bundles Dart 3.9.x
+WORKDIR /app
+
+# Enable web
+RUN flutter config --enable-web
+
+# Cache dependencies
+COPY pubspec.yaml pubspec.lock ./
+RUN flutter pub get
+
+# Copy source and build
+COPY . .
+# Pass signaling URL at build time if needed
+ARG WS_URL
+RUN flutter build web --release --web-renderer=html --dart-define=WS_URL=${WS_URL}
+
+# Stage 2: Serve with Nginx
+FROM nginx:alpine
+# SPA routing config
+RUN rm /etc/nginx/conf.d/default.conf
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+
+# Copy built site
+COPY --from=build /app/build/web /usr/share/nginx/html
+EXPOSE 80
+
+# Healthcheck (optional)
+HEALTHCHECK --interval=30s --timeout=3s CMD wget -qO- http://localhost/ || exit 1
