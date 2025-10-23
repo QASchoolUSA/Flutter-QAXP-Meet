@@ -6,7 +6,7 @@ WORKDIR /app
 # Enable web
 RUN flutter config --enable-web
 # Print versions for sanity
-RUN flutter --version && dart --version
+RUN flutter --version && dart --version && flutter doctor -v
 
 # Cache dependencies
 COPY pubspec.yaml pubspec.lock ./
@@ -16,11 +16,11 @@ RUN flutter pub get
 COPY . .
 # Pass signaling URL at build time if needed
 ARG WS_URL
-RUN flutter build web --release --dart-define=WS_URL=${WS_URL}
+RUN flutter build web --release -v --dart-define=WS_URL=${WS_URL}
 
 # Stage 2: Serve with Nginx
 FROM nginx:alpine
-# SPA routing config
+RUN apk add --no-cache curl
 RUN rm /etc/nginx/conf.d/default.conf
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 
@@ -29,4 +29,4 @@ COPY --from=build /app/build/web /usr/share/nginx/html
 EXPOSE 80
 
 # Healthcheck (optional)
-HEALTHCHECK --interval=30s --timeout=3s CMD wget -qO- http://localhost/ || exit 1
+HEALTHCHECK --interval=30s --timeout=3s CMD curl -fsS http://localhost/ || exit 1
