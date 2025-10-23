@@ -1,6 +1,8 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'dart:convert';
+import 'package:web_socket_channel/web_socket_channel.dart';
 
 void main() {
   runApp(const MyApp());
@@ -102,8 +104,9 @@ class _HomePageState extends State<HomePage> {
                       ],
                     ),
                     const SizedBox(height: 8),
-                    const Text('Local preview only (signaling disabled).',
+                    const Text('Share the room name; the other peer auto-connects.',
                         textAlign: TextAlign.center, style: TextStyle(color: Colors.black45)),
+
                   ],
                 ),
               ),
@@ -136,6 +139,10 @@ class _RoomPageState extends State<RoomPage> {
   final FocusNode _focusHangup = FocusNode(debugLabel: 'Hang up');
 
   // Signaling channel removed for web-only local preview.
+  String get _wsEndpoint =>
+      const String.fromEnvironment('WS_URL', defaultValue: 'wss://signal.qaxp.com/ws');
+  WebSocketChannel? _channel;
+
   RTCPeerConnection? _pc;
   MediaStream? _localStream;
 
@@ -190,8 +197,135 @@ class _RoomPageState extends State<RoomPage> {
   }
 
   Future<void> _setupSignalingAndRTC() async {
-    // Local-only mode: no signaling, no remote peer connection.
-    // Just keep local preview active.
+    // Create RTCPeerConnection with a public STUN server
+    final configuration = {
+      'iceServers': [
+        {'urls': 'stun:stun.l.google.com:19302'},
+      ],
+      'sdpSemantics': 'unified-plan',
+    };
+    _pc = await createPeerConnection(configuration);
+
+    // Add local tracks
+    final local = _localStream;
+    if (local != null) {
+      for (final t in local.getTracks()) {
+        await _pc!.addTrack(t, local);
+      }
+    }
+
+    // Remote track handler
+    _pc!.onTrack = (RTCTrackEvent event) {
+      if (event.streams.isNotEmpty) {
+        _remoteRenderer.srcObject = event.streams.first;
+        setState(() {
+          _peerJoined = true;
+        });
+      }
+    };
+
+    // ICE candidate handler: send to signaling server
+    _pc!.onIceCandidate = (RTCIceCandidate candidate) {
+      if (_channel != null) {
+        _send({
+          'type': 'ice',
+          'room': widget.roomName,
+          'candidate': {
+            'candidate': candidate.candidate,
+            'sdpMid': candidate.sdpMid,
+            'sdpMLineIndex': candidate.sdpMLineIndex,
+          },
+        });
+      }
+    };
+
+    // Connect to signaling server via WebSocket
+    try {
+      _channel = WebSocketChannel.connect(Uri.parse(_wsEndpoint));
+    } catch (_) {
+      // If connection fails, keep local preview
+      return;
+    }
+
+    // Join the room
+    _send({'type': 'join', 'room': widget.roomName});
+
+    // Handle messages
+    _channel!.stream.listen((dynamic data) async {
+      Map<String, dynamic> msg;
+      try {
+        msg = data is String ? jsonDecode(data) : (data as Map<String, dynamic>);
+      } catch (_) {
+        return;
+      }
+
+      switch (msg['type']) {
+        case 'peer-joined':
+        case 'ready':
+          // Remote peer is available; start the call by creating an offer
+          await _startCall();
+          break;
+
+        case 'offer':
+          {
+            final sdp = msg['sdp'] as String?;
+            if (sdp == null || _pc == null) break;
+            await _pc!.setRemoteDescription(RTCSessionDescription(sdp, 'offer'));
+            final answer = await _pc!.createAnswer();
+            await _pc!.setLocalDescription(answer);
+            _send({'type': 'answer', 'room': widget.roomName, 'sdp': answer.sdp});
+          }
+          break;
+
+        case 'answer':
+          {
+            final sdp = msg['sdp'] as String?;
+            if (sdp == null || _pc == null) break;
+            await _pc!.setRemoteDescription(RTCSessionDescription(sdp, 'answer'));
+          }
+          break;
+
+        case 'ice':
+          {
+            final cand = msg['candidate'] as Map<String, dynamic>?;
+            if (cand == null || _pc == null) break;
+            final ice = RTCIceCandidate(
+              cand['candidate'] as String?,
+              cand['sdpMid'] as String?,
+              cand['sdpMLineIndex'] as int?,
+            );
+            await _pc!.addCandidate(ice);
+          }
+          break;
+
+        case 'leave':
+        case 'peer-left':
+          // Remote hung up
+          setState(() {
+            _peerJoined = false;
+            _remoteRenderer.srcObject = null;
+          });
+          break;
+      }
+    }, onDone: () {
+      // Channel closed – keep local preview
+    }, onError: (e) {
+      // Errors – keep local preview
+    });
+  }
+
+  Future<void> _startCall() async {
+    if (_pc == null) return;
+    // Create and send offer
+    final offer = await _pc!.createOffer();
+    await _pc!.setLocalDescription(offer);
+    _send({'type': 'offer', 'room': widget.roomName, 'sdp': offer.sdp});
+  }
+
+  void _send(Map<String, dynamic> msg) {
+    try {
+      _channel?.sink.add(jsonEncode(msg));
+    } catch (_) {}
   }
 
   Future<void> _toggleMic() async {
@@ -264,6 +398,8 @@ class _RoomPageState extends State<RoomPage> {
   }
 
   Future<void> _hangup() async {
+    _send({'type': 'leave', 'room': widget.roomName});
+    await _channel?.sink.close();
     await _pc?.close();
     await _localRenderer.dispose();
     await _remoteRenderer.dispose();
