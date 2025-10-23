@@ -145,6 +145,8 @@ class _RoomPageState extends State<RoomPage> {
 
   RTCPeerConnection? _pc;
   MediaStream? _localStream;
+  MediaStream? _remoteStream;
+  final List<Map<String, dynamic>> _pendingIce = [];
 
   bool _micEnabled = true;
   bool _videoEnabled = true;
@@ -187,13 +189,20 @@ class _RoomPageState extends State<RoomPage> {
   }
 
   Future<void> _setupMedia() async {
-    final Map<String, dynamic> constraints = {
-      'audio': _selectedMicId != null ? {'deviceId': _selectedMicId} : true,
-      'video': _selectedCamId != null ? {'deviceId': _selectedCamId} : true,
-    };
-    final stream = await navigator.mediaDevices.getUserMedia(constraints);
-    _localStream = stream;
-    _localRenderer.srcObject = _localStream;
+    try {
+      final isMobile = defaultTargetPlatform == TargetPlatform.iOS || defaultTargetPlatform == TargetPlatform.android;
+      final audioConstraints = isMobile ? true : (_selectedMicId != null ? {'deviceId': _selectedMicId} : true);
+      final videoConstraints = isMobile ? {'facingMode': 'user'} : (_selectedCamId != null ? {'deviceId': _selectedCamId} : true);
+      final Map<String, dynamic> constraints = {
+        'audio': audioConstraints,
+        'video': videoConstraints,
+      };
+      final stream = await navigator.mediaDevices.getUserMedia(constraints);
+      _localStream = stream;
+      _localRenderer.srcObject = _localStream;
+    } catch (e) {
+      // Common causes: permissions denied or insecure context (no HTTPS)
+    }
   }
 
   Future<void> _setupSignalingAndRTC() async {
@@ -214,14 +223,28 @@ class _RoomPageState extends State<RoomPage> {
       }
     }
 
-    // Remote track handler
-    _pc!.onTrack = (RTCTrackEvent event) {
+    // Remote track handler (Unified Plan)
+    _pc!.onTrack = (RTCTrackEvent event) async {
+      MediaStream? stream;
       if (event.streams.isNotEmpty) {
-        _remoteRenderer.srcObject = event.streams.first;
+        stream = event.streams.first;
+      } else if (event.track != null) {
+        _remoteStream ??= await createLocalMediaStream('remote');
+        await _remoteStream!.addTrack(event.track!);
+        stream = _remoteStream;
+      }
+      if (stream != null) {
+        _remoteRenderer.srcObject = stream;
         setState(() {
           _peerJoined = true;
         });
       }
+    };
+
+    // Plan-B fallback (some browsers/servers)
+    _pc!.onAddStream = (MediaStream stream) {
+      _remoteRenderer.srcObject = stream;
+      setState(() => _peerJoined = true);
     };
 
     // ICE candidate handler: send to signaling server
@@ -271,6 +294,16 @@ class _RoomPageState extends State<RoomPage> {
             final sdp = msg['sdp'] as String?;
             if (sdp == null || _pc == null) break;
             await _pc!.setRemoteDescription(RTCSessionDescription(sdp, 'offer'));
+            // Flush any pending ICE received before remote description was set
+            for (final cand in _pendingIce) {
+              await _pc!.addCandidate(RTCIceCandidate(
+                cand['candidate'] as String?,
+                cand['sdpMid'] as String?,
+                cand['sdpMLineIndex'] as int?,
+              ));
+            }
+            _pendingIce.clear();
+
             final answer = await _pc!.createAnswer();
             await _pc!.setLocalDescription(answer);
             _send({'type': 'answer', 'room': widget.roomName, 'sdp': answer.sdp});
@@ -282,6 +315,15 @@ class _RoomPageState extends State<RoomPage> {
             final sdp = msg['sdp'] as String?;
             if (sdp == null || _pc == null) break;
             await _pc!.setRemoteDescription(RTCSessionDescription(sdp, 'answer'));
+            // Flush pending ICE
+            for (final cand in _pendingIce) {
+              await _pc!.addCandidate(RTCIceCandidate(
+                cand['candidate'] as String?,
+                cand['sdpMid'] as String?,
+                cand['sdpMLineIndex'] as int?,
+              ));
+            }
+            _pendingIce.clear();
           }
           break;
 
@@ -289,12 +331,16 @@ class _RoomPageState extends State<RoomPage> {
           {
             final cand = msg['candidate'] as Map<String, dynamic>?;
             if (cand == null || _pc == null) break;
-            final ice = RTCIceCandidate(
-              cand['candidate'] as String?,
-              cand['sdpMid'] as String?,
-              cand['sdpMLineIndex'] as int?,
-            );
-            await _pc!.addCandidate(ice);
+            final remoteDesc = await _pc!.getRemoteDescription();
+            if (remoteDesc == null) {
+              _pendingIce.add(cand);
+            } else {
+              await _pc!.addCandidate(RTCIceCandidate(
+                cand['candidate'] as String?,
+                cand['sdpMid'] as String?,
+                cand['sdpMLineIndex'] as int?,
+              ));
+            }
           }
           break;
 
@@ -304,6 +350,7 @@ class _RoomPageState extends State<RoomPage> {
           setState(() {
             _peerJoined = false;
             _remoteRenderer.srcObject = null;
+            _remoteStream = null;
           });
           break;
       }
