@@ -1,10 +1,12 @@
 # Stage 1: Build Flutter web
 FROM ghcr.io/cirruslabs/flutter:3.35.6 AS build
-# CirrusLabs images are multi-arch; 3.24.x bundles Dart 3.9.x
+# CirrusLabs images are multi-arch; 3.35.x bundles Dart 3.9.x
 WORKDIR /app
 
 # Enable web
 RUN flutter config --enable-web
+# Print versions for sanity
+RUN flutter --version && dart --version
 
 # Cache dependencies
 COPY pubspec.yaml pubspec.lock ./
@@ -14,7 +16,7 @@ RUN flutter pub get
 COPY . .
 # Pass signaling URL at build time if needed
 ARG WS_URL
-RUN flutter build web --release --web-renderer=html --dart-define=WS_URL=${WS_URL}
+RUN flutter build web --release --dart-define=WS_URL=${WS_URL}
 
 # Stage 2: Serve with Nginx
 FROM nginx:alpine
