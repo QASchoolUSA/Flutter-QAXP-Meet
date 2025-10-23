@@ -391,154 +391,191 @@ class _RoomPageState extends State<RoomPage> {
 
   @override
   Widget build(BuildContext context) {
+    // Build individual controls to allow grouped spacing and styling
+    final micToggle = Semantics(
+      label: 'Toggle microphone',
+      button: true,
+      child: ElevatedButton(
+        focusNode: _focusMicToggle,
+        onPressed: _toggleMic,
+        style: ButtonStyle(
+          shape: MaterialStateProperty.all(const CircleBorder()),
+          padding: MaterialStateProperty.all(const EdgeInsets.all(14)),
+          elevation: MaterialStateProperty.resolveWith((states) =>
+              states.contains(MaterialState.hovered) ? 6 : 0),
+          backgroundColor: MaterialStateProperty.resolveWith((states) =>
+              states.contains(MaterialState.pressed)
+                  ? Colors.white.withOpacity(0.16)
+                  : Colors.white.withOpacity(0.10)),
+          foregroundColor: MaterialStateProperty.all(Colors.white),
+        ),
+        child: Icon(_micEnabled ? Icons.mic : Icons.mic_off),
+      ),
+    );
+
+    final micMenu = Semantics(
+      label: 'Open microphone devices menu',
+      button: true,
+      child: Focus(
+        focusNode: _focusMicMenu,
+        child: Container(
+          decoration: BoxDecoration(
+            color: Colors.white.withOpacity(0.10),
+            shape: BoxShape.circle,
+            boxShadow: const [
+              BoxShadow(color: Colors.black26, blurRadius: 8, offset: Offset(0, 2)),
+            ],
+          ),
+          child: PopupMenuButton<String>(
+            tooltip: 'Select microphone',
+            icon: const Icon(Icons.keyboard_arrow_up, size: 20, color: Colors.white),
+            itemBuilder: (context) {
+              final entries = <PopupMenuEntry<String>>[];
+              if (_selectedMicId != null) {
+                entries.add(const PopupMenuItem<String>(
+                  enabled: false,
+                  child: Text('Selected', style: TextStyle(fontWeight: FontWeight.bold)),
+                ));
+                final selected = _audioInputs.firstWhere(
+                  (d) => d.deviceId == _selectedMicId,
+                  orElse: () => MediaDeviceInfo(label: 'Microphone', deviceId: _selectedMicId ?? '', kind: 'audioinput'),
+                );
+                entries.add(PopupMenuItem<String>(
+                  value: selected.deviceId,
+                  child: Row(children: [
+                    const Icon(Icons.check, size: 16),
+                    const SizedBox(width: 6),
+                    Text(selected.label.isEmpty ? 'Microphone' : selected.label, style: const TextStyle(fontWeight: FontWeight.bold)),
+                  ]),
+                ));
+                entries.add(const PopupMenuDivider());
+                entries.add(const PopupMenuItem<String>(
+                  enabled: false,
+                  child: Text('Available'),
+                ));
+              }
+              for (final d in _audioInputs.where((d) => d.deviceId != _selectedMicId)) {
+                entries.add(PopupMenuItem<String>(value: d.deviceId, child: Text(d.label.isEmpty ? 'Microphone' : d.label)));
+              }
+              if (entries.isEmpty) {
+                entries.add(const PopupMenuItem<String>(value: 'none', child: Text('No microphones')));
+              }
+              return entries;
+            },
+            onSelected: (id) {
+              if (id != 'none') _switchMicTo(id);
+            },
+          ),
+        ),
+      ),
+    );
+
+    final camToggle = Semantics(
+      label: 'Toggle camera',
+      button: true,
+      child: ElevatedButton(
+        focusNode: _focusCamToggle,
+        onPressed: _toggleVideo,
+        style: ButtonStyle(
+          shape: MaterialStateProperty.all(const CircleBorder()),
+          padding: MaterialStateProperty.all(const EdgeInsets.all(14)),
+          elevation: MaterialStateProperty.resolveWith((states) =>
+              states.contains(MaterialState.hovered) ? 6 : 0),
+          backgroundColor: MaterialStateProperty.resolveWith((states) =>
+              states.contains(MaterialState.pressed)
+                  ? Colors.white.withOpacity(0.16)
+                  : Colors.white.withOpacity(0.10)),
+          foregroundColor: MaterialStateProperty.all(Colors.white),
+        ),
+        child: Icon(_videoEnabled ? Icons.videocam : Icons.videocam_off),
+      ),
+    );
+
+    final camMenu = Semantics(
+      label: 'Open camera devices menu',
+      button: true,
+      child: Focus(
+        focusNode: _focusCamMenu,
+        child: Container(
+          decoration: BoxDecoration(
+            color: Colors.white.withOpacity(0.10),
+            shape: BoxShape.circle,
+            boxShadow: const [
+              BoxShadow(color: Colors.black26, blurRadius: 8, offset: Offset(0, 2)),
+            ],
+          ),
+          child: PopupMenuButton<String>(
+            tooltip: 'Select camera',
+            icon: const Icon(Icons.keyboard_arrow_up, size: 20, color: Colors.white),
+            itemBuilder: (context) {
+              final entries = <PopupMenuEntry<String>>[];
+              if (_selectedCamId != null) {
+                entries.add(const PopupMenuItem<String>(
+                  enabled: false,
+                  child: Text('Selected', style: TextStyle(fontWeight: FontWeight.bold)),
+                ));
+                final selected = _videoInputs.firstWhere(
+                  (d) => d.deviceId == _selectedCamId,
+                  orElse: () => MediaDeviceInfo(label: 'Camera', deviceId: _selectedCamId ?? '', kind: 'videoinput'),
+                );
+                entries.add(PopupMenuItem<String>(
+                  value: selected.deviceId,
+                  child: Row(children: [
+                    const Icon(Icons.check, size: 16),
+                    const SizedBox(width: 6),
+                    Text(selected.label.isEmpty ? 'Camera' : selected.label, style: const TextStyle(fontWeight: FontWeight.bold)),
+                  ]),
+                ));
+                entries.add(const PopupMenuDivider());
+                entries.add(const PopupMenuItem<String>(
+                  enabled: false,
+                  child: Text('Available'),
+                ));
+              }
+              for (final d in _videoInputs.where((d) => d.deviceId != _selectedCamId)) {
+                entries.add(PopupMenuItem<String>(value: d.deviceId, child: Text(d.label.isEmpty ? 'Camera' : d.label)));
+              }
+              if (entries.isEmpty) {
+                entries.add(const PopupMenuItem<String>(value: 'none', child: Text('No cameras')));
+              }
+              return entries;
+            },
+            onSelected: (id) {
+              if (id != 'none') _switchCameraTo(id);
+            },
+          ),
+        ),
+      ),
+    );
+
+    final hangupBtn = Semantics(
+      label: 'Hang up',
+      button: true,
+      child: ElevatedButton(
+        focusNode: _focusHangup,
+        style: ButtonStyle(
+          shape: MaterialStateProperty.all(const CircleBorder()),
+          padding: MaterialStateProperty.all(const EdgeInsets.all(16)),
+          elevation: MaterialStateProperty.resolveWith((states) =>
+              states.contains(MaterialState.hovered) ? 8 : 0),
+          backgroundColor: MaterialStateProperty.all(const Color(0xFFE53935)),
+          foregroundColor: MaterialStateProperty.all(Colors.white),
+        ),
+        onPressed: _hangup,
+        child: const Icon(Icons.call_end),
+      ),
+    );
+
     final controls = FocusTraversalGroup(
       child: Wrap(
-        spacing: 12,
+        spacing: 20,
         runSpacing: 12,
         crossAxisAlignment: WrapCrossAlignment.center,
         alignment: WrapAlignment.center,
         children: [
-          // Mic toggle (icon-only)
-          Semantics(
-            label: 'Toggle microphone',
-            button: true,
-            child: ElevatedButton(
-              focusNode: _focusMicToggle,
-              onPressed: _toggleMic,
-              style: ElevatedButton.styleFrom(
-                shape: const CircleBorder(),
-                padding: const EdgeInsets.all(14),
-              ),
-              child: Icon(_micEnabled ? Icons.mic : Icons.mic_off),
-            ),
-          ),
-          // Mic device picker popup
-          Semantics(
-            label: 'Open microphone devices menu',
-            button: true,
-            child: Focus(
-              focusNode: _focusMicMenu,
-              child: PopupMenuButton<String>(
-                tooltip: 'Select microphone',
-                icon: const Icon(Icons.keyboard_arrow_up, size: 20),
-                itemBuilder: (context) {
-                  final entries = <PopupMenuEntry<String>>[];
-                  if (_selectedMicId != null) {
-                    entries.add(const PopupMenuItem<String>(
-                      enabled: false,
-                      child: Text('Selected', style: TextStyle(fontWeight: FontWeight.bold)),
-                    ));
-                    final selected = _audioInputs.firstWhere(
-                      (d) => d.deviceId == _selectedMicId,
-                      orElse: () => MediaDeviceInfo(label: 'Microphone', deviceId: _selectedMicId ?? '', kind: 'audioinput'),
-                    );
-                    entries.add(PopupMenuItem<String>(
-                      value: selected.deviceId,
-                      child: Row(children: [
-                        const Icon(Icons.check, size: 16),
-                        const SizedBox(width: 6),
-                        Text(selected.label.isEmpty ? 'Microphone' : selected.label, style: const TextStyle(fontWeight: FontWeight.bold)),
-                      ]),
-                    ));
-                    entries.add(const PopupMenuDivider());
-                    entries.add(const PopupMenuItem<String>(
-                      enabled: false,
-                      child: Text('Available'),
-                    ));
-                  }
-                  for (final d in _audioInputs.where((d) => d.deviceId != _selectedMicId)) {
-                    entries.add(PopupMenuItem<String>(value: d.deviceId, child: Text(d.label.isEmpty ? 'Microphone' : d.label)));
-                  }
-                  if (entries.isEmpty) {
-                    entries.add(const PopupMenuItem<String>(value: 'none', child: Text('No microphones')));
-                  }
-                  return entries;
-                },
-                onSelected: (id) {
-                  if (id != 'none') _switchMicTo(id);
-                },
-              ),
-            ),
-          ),
-
-          // Video toggle (icon-only)
-          Semantics(
-            label: 'Toggle camera',
-            button: true,
-            child: ElevatedButton(
-              focusNode: _focusCamToggle,
-              onPressed: _toggleVideo,
-              style: ElevatedButton.styleFrom(
-                shape: const CircleBorder(),
-                padding: const EdgeInsets.all(14),
-              ),
-              child: Icon(_videoEnabled ? Icons.videocam : Icons.videocam_off),
-            ),
-          ),
-          // Camera device picker popup
-          Semantics(
-            label: 'Open camera devices menu',
-            button: true,
-            child: Focus(
-              focusNode: _focusCamMenu,
-              child: PopupMenuButton<String>(
-                tooltip: 'Select camera',
-                icon: const Icon(Icons.keyboard_arrow_up, size: 20),
-                itemBuilder: (context) {
-                  final entries = <PopupMenuEntry<String>>[];
-                  if (_selectedCamId != null) {
-                    entries.add(const PopupMenuItem<String>(
-                      enabled: false,
-                      child: Text('Selected', style: TextStyle(fontWeight: FontWeight.bold)),
-                    ));
-                    final selected = _videoInputs.firstWhere(
-                      (d) => d.deviceId == _selectedCamId,
-                      orElse: () => MediaDeviceInfo(label: 'Camera', deviceId: _selectedCamId ?? '', kind: 'videoinput'),
-                    );
-                    entries.add(PopupMenuItem<String>(
-                      value: selected.deviceId,
-                      child: Row(children: [
-                        const Icon(Icons.check, size: 16),
-                        const SizedBox(width: 6),
-                        Text(selected.label.isEmpty ? 'Camera' : selected.label, style: const TextStyle(fontWeight: FontWeight.bold)),
-                      ]),
-                    ));
-                    entries.add(const PopupMenuDivider());
-                    entries.add(const PopupMenuItem<String>(
-                      enabled: false,
-                      child: Text('Available'),
-                    ));
-                  }
-                  for (final d in _videoInputs.where((d) => d.deviceId != _selectedCamId)) {
-                    entries.add(PopupMenuItem<String>(value: d.deviceId, child: Text(d.label.isEmpty ? 'Camera' : d.label)));
-                  }
-                  if (entries.isEmpty) {
-                    entries.add(const PopupMenuItem<String>(value: 'none', child: Text('No cameras')));
-                  }
-                  return entries;
-                },
-                onSelected: (id) {
-                  if (id != 'none') _switchCameraTo(id);
-                },
-              ),
-            ),
-          ),
-
-          // Hang up (icon-only)
-          Semantics(
-            label: 'Hang up',
-            button: true,
-            child: ElevatedButton(
-              focusNode: _focusHangup,
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.red,
-                shape: const CircleBorder(),
-                padding: const EdgeInsets.all(14),
-              ),
-              onPressed: _hangup,
-              child: const Icon(Icons.call_end),
-            ),
-          ),
+          Row(mainAxisSize: MainAxisSize.min, children: [micToggle, const SizedBox(width: 8), micMenu]),
+          Row(mainAxisSize: MainAxisSize.min, children: [camToggle, const SizedBox(width: 8), camMenu]),
+          hangupBtn,
         ],
       ),
     );
@@ -569,7 +606,24 @@ class _RoomPageState extends State<RoomPage> {
       body: Column(
         children: [
           Expanded(child: videos),
-          Padding(padding: const EdgeInsets.all(12), child: controls),
+          SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 12),
+              child: Center(
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withOpacity(0.55),
+                    borderRadius: BorderRadius.circular(28),
+                    boxShadow: const [
+                      BoxShadow(color: Colors.black26, blurRadius: 16, offset: Offset(0, 8)),
+                    ],
+                  ),
+                  child: controls,
+                ),
+              ),
+            ),
+          ),
         ],
       ),
     );
