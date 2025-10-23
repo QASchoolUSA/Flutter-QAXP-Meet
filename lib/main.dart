@@ -285,6 +285,9 @@ class _RoomPageState extends State<RoomPage> {
       switch (msg['type']) {
         case 'peer-joined':
         case 'ready':
+        case 'nudge':
+        case 'start_negotiation':
+        case 'start-negotiation':
           // Remote peer is available; start the call by creating an offer
           await _startCall();
           break;
@@ -328,6 +331,7 @@ class _RoomPageState extends State<RoomPage> {
           break;
 
         case 'ice':
+        case 'candidate':
           {
             final cand = msg['candidate'] as Map<String, dynamic>?;
             if (cand == null || _pc == null) break;
