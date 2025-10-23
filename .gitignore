@@ -51,7 +51,7 @@ android/app/release
 
 # Node
 node_modules/
-signaling_server/node_modules/
+signaling_server/
 
 # Keys
 *.keystore

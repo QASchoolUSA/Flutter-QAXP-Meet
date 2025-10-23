@@ -14,9 +14,8 @@ RUN flutter pub get
 
 # Copy source and build
 COPY . .
-# Pass signaling URL at build time if needed
-ARG WS_URL
-RUN flutter build web --release -v --dart-define=WS_URL=${WS_URL}
+# Build web release (no signaling arg)
+RUN flutter build web --release -v
 
 # Stage 2: Serve with Nginx
 FROM nginx:alpine

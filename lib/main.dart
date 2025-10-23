@@ -1,8 +1,6 @@
-import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
-import 'package:web_socket_channel/web_socket_channel.dart';
 
 void main() {
   runApp(const MyApp());
@@ -104,7 +102,7 @@ class _HomePageState extends State<HomePage> {
                       ],
                     ),
                     const SizedBox(height: 8),
-                    const Text('First join becomes Caller; second becomes Callee.',
+                    const Text('Local preview only (signaling disabled).',
                         textAlign: TextAlign.center, style: TextStyle(color: Colors.black45)),
                   ],
                 ),
@@ -126,14 +124,7 @@ class RoomPage extends StatefulWidget {
 }
 
 class _RoomPageState extends State<RoomPage> {
-  String get _wsEndpoint {
-    const String env = String.fromEnvironment('WS_URL', defaultValue: '');
-    if (env.isNotEmpty) return env;
-    final base = Uri.base;
-    final scheme = base.scheme == 'https' ? 'wss' : 'ws';
-    final port = base.hasPort ? ':${base.port}' : '';
-    return '$scheme://${base.host}$port';
-  }
+  // Signaling removed; local-only mode.
 
   final RTCVideoRenderer _localRenderer = RTCVideoRenderer();
   final RTCVideoRenderer _remoteRenderer = RTCVideoRenderer();
@@ -144,7 +135,7 @@ class _RoomPageState extends State<RoomPage> {
   final FocusNode _focusCamMenu = FocusNode(debugLabel: 'Camera menu');
   final FocusNode _focusHangup = FocusNode(debugLabel: 'Hang up');
 
-  WebSocketChannel? _channel;
+  // Signaling channel removed for web-only local preview.
   RTCPeerConnection? _pc;
   MediaStream? _localStream;
 
@@ -199,99 +190,8 @@ class _RoomPageState extends State<RoomPage> {
   }
 
   Future<void> _setupSignalingAndRTC() async {
-    // Connect signaling
-    _channel = WebSocketChannel.connect(Uri.parse(_wsEndpoint));
-    _channel!.sink.add(jsonEncode({'type': 'join', 'room': widget.roomName}));
-
-    // Create PeerConnection
-    final config = {
-      'iceServers': [
-        {'urls': ['stun:stun.l.google.com:19302']}
-      ],
-    };
-    final pc = await createPeerConnection(config);
-    _pc = pc;
-
-    // Add local tracks
-    final ls = _localStream!;
-    for (var t in ls.getTracks()) {
-      await pc.addTrack(t, ls);
-    }
-
-    pc.onIceCandidate = (candidate) {
-      _channel?.sink.add(jsonEncode({
-        'type': 'signal',
-        'room': widget.roomName,
-        'payload': candidate.toMap(),
-      }));
-    };
-
-    pc.onTrack = (event) {
-      if (event.streams.isNotEmpty) {
-        _remoteRenderer.srcObject = event.streams[0];
-        if (mounted) setState(() { _peerJoined = true; });
-      }
-    };
-
-    _channel!.stream.listen((data) async {
-      final msg = jsonDecode(data);
-      switch (msg['type']) {
-        case 'joined':
-          setState(() => _role = msg['role'] as String?);
-          break;
-        case 'peer_joined':
-          setState(() { _peerJoined = true; });
-          break;
-        case 'start_negotiation':
-          if (_role == 'caller') {
-            final offer = await pc.createOffer({'offerToReceiveAudio': 1, 'offerToReceiveVideo': 1});
-            await pc.setLocalDescription(offer);
-            _channel?.sink.add(jsonEncode({
-              'type': 'signal',
-              'room': widget.roomName,
-              'payload': {'type': offer.type, 'sdp': offer.sdp},
-            }));
-          }
-          break;
-        case 'signal':
-          final payload = msg['payload'];
-          if (payload == null) return;
-          // ICE candidate
-          if (payload['candidate'] != null) {
-            final cand = RTCIceCandidate(
-              payload['candidate'],
-              payload['sdpMid'],
-              payload['sdpMLineIndex'],
-            );
-            await pc.addCandidate(cand);
-          } else {
-            // SDP
-            final desc = RTCSessionDescription(payload['sdp'], payload['type']);
-            await pc.setRemoteDescription(desc);
-            if (desc.type == 'offer') {
-              final answer = await pc.createAnswer({'offerToReceiveAudio': 1, 'offerToReceiveVideo': 1});
-              await pc.setLocalDescription(answer);
-              _channel?.sink.add(jsonEncode({
-                'type': 'signal',
-                'room': widget.roomName,
-                'payload': {'type': answer.type, 'sdp': answer.sdp},
-              }));
-            }
-          }
-          break;
-        case 'peer_left':
-          setState(() {
-            _peerJoined = false;
-            _remoteRenderer.srcObject = null;
-          });
-          break;
-        case 'room_full':
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Room is full (max 2 participants).')),
-          );
-          break;
-      }
-    });
+    // Local-only mode: no signaling, no remote peer connection.
+    // Just keep local preview active.
   }
 
   Future<void> _toggleMic() async {
@@ -364,12 +264,10 @@ class _RoomPageState extends State<RoomPage> {
   }
 
   Future<void> _hangup() async {
-    _channel?.sink.add(jsonEncode({'type': 'leave', 'room': widget.roomName}));
     await _pc?.close();
     await _localRenderer.dispose();
     await _remoteRenderer.dispose();
     await _localStream?.dispose();
-    _channel?.sink.close();
     if (mounted) Navigator.of(context).pop();
   }
 
