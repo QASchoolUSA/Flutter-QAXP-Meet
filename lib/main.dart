@@ -169,9 +169,7 @@ class _RoomPageState extends State<RoomPage> {
   String? _selectedCamId;
 
   void _debug(String message) {
-    if (kDebugMode) {
-      print('[meet] ' + message);
-    }
+    print('[meet] ' + message);
   }
 
   @override
