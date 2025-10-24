@@ -272,17 +272,14 @@ class _RoomPageState extends State<RoomPage> {
     _pc!.onIceCandidate = (RTCIceCandidate candidate) {
       if (_channel != null && (candidate.candidate?.isNotEmpty ?? false)) {
         final payload = {
-          'type': 'candidate',
+          'type': 'signal',
           'room': widget.roomName,
-          'candidate': {
+          'payload': {
+            'type': 'candidate',
             'candidate': candidate.candidate,
             'sdpMid': candidate.sdpMid,
             'sdpMLineIndex': candidate.sdpMLineIndex,
-          },
-          // Alternate shape some servers expect
-          'ice': candidate.candidate,
-          'sdpMid': candidate.sdpMid,
-          'sdpMLineIndex': candidate.sdpMLineIndex,
+          }
         };
         _debug('send ICE');
         _send(payload);
@@ -319,13 +316,105 @@ class _RoomPageState extends State<RoomPage> {
       _debug('recv: ' + type);
 
       switch (type) {
+        case 'joined':
+          _role = (msg['role'] ?? '').toString();
+          _debug('joined as ' + (_role ?? ''));
+          break;
+
+        case 'signal':
+          {
+            final payload = msg['payload'];
+            if (payload is Map<String, dynamic>) {
+              final ptype = (payload['type'] ?? '').toString();
+              switch (ptype) {
+                case 'offer':
+                  {
+                    final sdp = payload['sdp'] as String?;
+                    if (sdp == null || _pc == null) break;
+                    _debug('setRemoteDescription(offer)');
+                    await _pc!.setRemoteDescription(RTCSessionDescription(sdp, 'offer'));
+                    for (final cand in _pendingIce) {
+                      await _pc!.addCandidate(RTCIceCandidate(
+                        cand['candidate'] as String?,
+                        cand['sdpMid'] as String?,
+                        cand['sdpMLineIndex'] as int?,
+                      ));
+                    }
+                    _pendingIce.clear();
+
+                    final answer = await _pc!.createAnswer();
+                    await _pc!.setLocalDescription(answer);
+                    _debug('send answer');
+                    _send({
+                      'type': 'signal',
+                      'room': widget.roomName,
+                      'payload': {
+                        'type': 'answer',
+                        'sdp': answer.sdp,
+                      }
+                    });
+                  }
+                  break;
+                case 'answer':
+                  {
+                    final sdp = payload['sdp'] as String?;
+                    if (sdp == null || _pc == null) break;
+                    _debug('setRemoteDescription(answer)');
+                    await _pc!.setRemoteDescription(RTCSessionDescription(sdp, 'answer'));
+                    for (final cand in _pendingIce) {
+                      await _pc!.addCandidate(RTCIceCandidate(
+                        cand['candidate'] as String?,
+                        cand['sdpMid'] as String?,
+                        cand['sdpMLineIndex'] as int?,
+                      ));
+                    }
+                    _pendingIce.clear();
+                  }
+                  break;
+                case 'candidate':
+                case 'ice':
+                  {
+                    final cand = <String, dynamic>{
+                      'candidate': payload['candidate'],
+                      'sdpMid': payload['sdpMid'],
+                      'sdpMLineIndex': payload['sdpMLineIndex'],
+                    };
+                    if (_pc == null) break;
+                    final remoteDesc = await _pc!.getRemoteDescription();
+                    if (remoteDesc == null) {
+                      _debug('buffer ICE');
+                      _pendingIce.add(cand);
+                    } else {
+                      _debug('add ICE');
+                      await _pc!.addCandidate(RTCIceCandidate(
+                        cand['candidate'] as String?,
+                        cand['sdpMid'] as String?,
+                        cand['sdpMLineIndex'] as int?,
+                      ));
+                    }
+                  }
+                  break;
+              }
+            }
+          }
+          break;
+
         case 'peer-joined':
+        case 'peer_joined':
         case 'ready':
         case 'nudge':
         case 'start_negotiation':
         case 'start-negotiation':
-          // Remote peer is available; start the call by creating an offer
           await _startCall();
+          break;
+
+        case 'peer-left':
+        case 'peer_left':
+          setState(() {
+            _peerJoined = false;
+            _remoteRenderer.srcObject = null;
+            _remoteStream = null;
+          });
           break;
 
         case 'offer':
@@ -438,11 +527,9 @@ class _RoomPageState extends State<RoomPage> {
     await _pc!.setLocalDescription(offer);
     _debug('send offer');
     _send({
-      'type': 'offer',
+      'type': 'signal',
       'room': widget.roomName,
-      'sdp': offer.sdp,
-      // Fallback nested structure some servers require
-      'offer': {
+      'payload': {
         'type': 'offer',
         'sdp': offer.sdp,
       }
