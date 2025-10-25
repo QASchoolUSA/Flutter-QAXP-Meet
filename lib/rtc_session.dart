@@ -70,6 +70,8 @@ class RtcSession extends ChangeNotifier {
       if (state == RTCIceConnectionState.RTCIceConnectionStateFailed) {
         _log('ICE failed; attempting ICE restart and renegotiation');
         _restartIceAndRenegotiate('ice_failed');
+      } else if (state == RTCIceConnectionState.RTCIceConnectionStateConnected) {
+        _ensureRemoteReceiving();
       }
     };
 
@@ -208,11 +210,13 @@ class RtcSession extends ChangeNotifier {
           'room': _roomName,
           'payload': {'type': 'answer', 'sdp': answer.sdp},
         });
+        _ensureRemoteReceiving();
         return;
       } else if (ptype == 'answer' && payload['sdp'] != null) {
         _log('Answer(received via wrapper): sdpLen=${(payload['sdp'] as String).length}');
         await _pc?.setRemoteDescription(
             RTCSessionDescription(payload['sdp'], 'answer'));
+        _ensureRemoteReceiving();
         return;
       } else if ((ptype == 'candidate' || ptype == 'ice') && payload['candidate'] != null) {
         final c = payload['candidate'];
@@ -250,6 +254,7 @@ class RtcSession extends ChangeNotifier {
             'room': _roomName,
             'payload': {'type': 'answer', 'sdp': answer.sdp},
           });
+          _ensureRemoteReceiving();
         }
         break;
       case 'answer':
@@ -257,6 +262,7 @@ class RtcSession extends ChangeNotifier {
           _log('Answer received: sdpLen=${(msg['sdp'] as String).length}');
           await _pc?.setRemoteDescription(
               RTCSessionDescription(msg['sdp'], 'answer'));
+          _ensureRemoteReceiving();
         }
         break;
       case 'ice':
@@ -288,6 +294,57 @@ class RtcSession extends ChangeNotifier {
         _log('WS error: $lastError');
         notifyListeners();
         break;
+    }
+  }
+
+  Future<void> _attachRemoteReceivers() async {
+    try {
+      final receivers = await _pc?.getReceivers() ?? [];
+      if (receivers.isEmpty) {
+        _log('No remote receivers yet');
+        return;
+      }
+      _remoteStream ??= await createLocalMediaStream('remote');
+      final remote = _remoteStream!;
+      for (final r in receivers) {
+        final track = r.track;
+        if (track != null) {
+          final exists = remote.getTracks().any((t) => t.id == track.id);
+          if (!exists) {
+            await remote.addTrack(track);
+            _log('Attached receiver ${track.kind} id=${track.id}');
+          }
+        }
+      }
+      if (remote.getTracks().isNotEmpty) {
+        remoteRenderer.srcObject = remote;
+        notifyListeners();
+      }
+    } catch (e) {
+      _log('attach receivers error: $e');
+    }
+  }
+
+  Future<void> _ensureRemoteReceiving() async {
+    try {
+      final receivers = await _pc?.getReceivers() ?? [];
+      final hasVideo = receivers.any((r) => r.track?.kind == 'video');
+      final hasAudio = receivers.any((r) => r.track?.kind == 'audio');
+      _log('Receivers count=${receivers.length} hasVideo=$hasVideo hasAudio=$hasAudio');
+      if (receivers.isNotEmpty) {
+        await _attachRemoteReceivers();
+        return;
+      }
+      await Future.delayed(const Duration(milliseconds: 600));
+      final receivers2 = await _pc?.getReceivers() ?? [];
+      if (receivers2.isEmpty) {
+        _log('No remote receivers after delay; triggering renegotiation');
+        _restartIceAndRenegotiate('no_remote_receivers');
+      } else {
+        await _attachRemoteReceivers();
+      }
+    } catch (e) {
+      _log('ensure remote receiving error: $e');
     }
   }
 
