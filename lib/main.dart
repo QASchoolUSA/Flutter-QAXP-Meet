@@ -172,6 +172,14 @@ class _RoomPageState extends State<RoomPage> {
   DateTime? _lastRenegotiateAt;
   bool _remoteVideoEnabled = true;
   bool _statsScheduled = false;
+  int _negotiationSeq = 0;
+  int _iceRestartAttempts = 0;
+  int _qualityLowCount = 0;
+  int _prevInboundVideoBytes = 0;
+  int _prevInboundAudioBytes = 0;
+  int _prevOutboundVideoBytes = 0;
+  int _prevOutboundAudioBytes = 0;
+  DateTime? _prevStatsAt;
 
   void _debug(String message) {
     print('[meet] ' + message);
@@ -247,6 +255,8 @@ class _RoomPageState extends State<RoomPage> {
     _pc!.onIceConnectionState = (RTCIceConnectionState state) {
       _debug('ICE state: ' + state.toString());
       if (state == RTCIceConnectionState.RTCIceConnectionStateConnected) {
+        _iceRestartAttempts = 0;
+        _qualityLowCount = 0;
         _attachRemoteReceivers();
         if (!_statsScheduled) {
           _statsScheduled = true;
@@ -256,6 +266,12 @@ class _RoomPageState extends State<RoomPage> {
         _restartIceAndRenegotiate('ice_failed');
       } else if (state == RTCIceConnectionState.RTCIceConnectionStateDisconnected) {
         _statsScheduled = false;
+        Future.delayed(const Duration(seconds: 2), () {
+          // If still disconnected after delay, try restart with backoff
+          if (_pc != null && _pc!.iceConnectionState == RTCIceConnectionState.RTCIceConnectionStateDisconnected) {
+            _restartIceAndRenegotiate('ice_disconnected');
+          }
+        });
       }
     };
 
@@ -394,30 +410,44 @@ class _RoomPageState extends State<RoomPage> {
                     final sdp = payload['sdp'] as String?;
                     if (sdp == null || _pc == null) break;
                     _debug('setRemoteDescription(offer)');
-                    await _pc!.setRemoteDescription(RTCSessionDescription(sdp, 'offer'));
-                    for (final cand in _pendingIce) {
-                      await _pc!.addCandidate(RTCIceCandidate(
-                        cand['candidate'] as String?,
-                        cand['sdpMid'] as String?,
-                        cand['sdpMLineIndex'] as int?,
-                      ));
+                    try {
+                      await _pc!.setRemoteDescription(RTCSessionDescription(sdp, 'offer'));
+                    } catch (e) {
+                      _debug('SRD(offer) error: ' + e.toString());
+                      _restartIceAndRenegotiate('srd_offer_error');
+                      break;
+                    }
+                    try {
+                      for (final cand in _pendingIce) {
+                        await _pc!.addCandidate(RTCIceCandidate(
+                          cand['candidate'] as String?,
+                          cand['sdpMid'] as String?,
+                          cand['sdpMLineIndex'] as int?,
+                        ));
+                      }
+                    } catch (e) {
+                      _debug('addCandidate after offer error: ' + e.toString());
                     }
                     _pendingIce.clear();
                     await _attachRemoteReceivers();
 
-                    final answer = await _pc!.createAnswer();
-                    await _pc!.setLocalDescription(answer);
-                    _debug('send answer');
-                    _send({
-                      'type': 'signal',
-                      'room': widget.roomName,
-                      'payload': {
-                        'type': 'answer',
-                        'sdp': answer.sdp,
-                      }
-                    });
-                    _renegotiating = false;
-                    _lastRenegotiateAt = DateTime.now();
+                    try {
+                      final answer = await _pc!.createAnswer();
+                      await _pc!.setLocalDescription(answer);
+                      _debug('send answer');
+                      _send({
+                        'type': 'signal',
+                        'room': widget.roomName,
+                        'payload': {
+                          'type': 'answer',
+                          'sdp': answer.sdp,
+                        }
+                      });
+                      _renegotiating = false;
+                      _lastRenegotiateAt = DateTime.now();
+                    } catch (e) {
+                      _debug('create/set answer error: ' + e.toString());
+                    }
                   }
                   break;
                 case 'answer':
@@ -430,13 +460,23 @@ class _RoomPageState extends State<RoomPage> {
                       break;
                     }
                     _debug('setRemoteDescription(answer)');
-                    await _pc!.setRemoteDescription(RTCSessionDescription(sdp, 'answer'));
-                    for (final cand in _pendingIce) {
-                      await _pc!.addCandidate(RTCIceCandidate(
-                        cand['candidate'] as String?,
-                        cand['sdpMid'] as String?,
-                        cand['sdpMLineIndex'] as int?,
-                      ));
+                    try {
+                      await _pc!.setRemoteDescription(RTCSessionDescription(sdp, 'answer'));
+                    } catch (e) {
+                      _debug('SRD(answer) error: ' + e.toString());
+                      _restartIceAndRenegotiate('srd_answer_error');
+                      break;
+                    }
+                    try {
+                      for (final cand in _pendingIce) {
+                        await _pc!.addCandidate(RTCIceCandidate(
+                          cand['candidate'] as String?,
+                          cand['sdpMid'] as String?,
+                          cand['sdpMLineIndex'] as int?,
+                        ));
+                      }
+                    } catch (e) {
+                      _debug('addCandidate after answer error: ' + e.toString());
                     }
                     _pendingIce.clear();
                     await _attachRemoteReceivers();
@@ -499,32 +539,46 @@ class _RoomPageState extends State<RoomPage> {
             sdp ??= (msg['offer'] is Map ? (msg['offer']['sdp'] as String?) : null);
             if (sdp == null || _pc == null) break;
             _debug('setRemoteDescription(offer)');
-            await _pc!.setRemoteDescription(RTCSessionDescription(sdp, 'offer'));
+            try {
+              await _pc!.setRemoteDescription(RTCSessionDescription(sdp, 'offer'));
+            } catch (e) {
+              _debug('SRD(offer) error: ' + e.toString());
+              _restartIceAndRenegotiate('srd_offer_error');
+              break;
+            }
             // Flush any pending ICE received before remote description was set
-            for (final cand in _pendingIce) {
-              await _pc!.addCandidate(RTCIceCandidate(
-                cand['candidate'] as String?,
-                cand['sdpMid'] as String?,
-                cand['sdpMLineIndex'] as int?,
-              ));
+            try {
+              for (final cand in _pendingIce) {
+                await _pc!.addCandidate(RTCIceCandidate(
+                  cand['candidate'] as String?,
+                  cand['sdpMid'] as String?,
+                  cand['sdpMLineIndex'] as int?,
+                ));
+              }
+            } catch (e) {
+              _debug('addCandidate after offer error: ' + e.toString());
             }
             _pendingIce.clear();
 
-            final answer = await _pc!.createAnswer();
-            await _pc!.setLocalDescription(answer);
-            _debug('send answer');
-            _send({
-              'type': 'answer',
-              'room': widget.roomName,
-              'sdp': answer.sdp,
-              // Fallback nested structure some servers require
-              'answer': {
+            try {
+              final answer = await _pc!.createAnswer();
+              await _pc!.setLocalDescription(answer);
+              _debug('send answer');
+              _send({
                 'type': 'answer',
+                'room': widget.roomName,
                 'sdp': answer.sdp,
-              }
-            });
-            _renegotiating = false;
-            _lastRenegotiateAt = DateTime.now();
+                // Fallback nested structure some servers require
+                'answer': {
+                  'type': 'answer',
+                  'sdp': answer.sdp,
+                }
+              });
+              _renegotiating = false;
+              _lastRenegotiateAt = DateTime.now();
+            } catch (e) {
+              _debug('create/set answer error: ' + e.toString());
+            }
           }
           break;
 
@@ -540,14 +594,24 @@ class _RoomPageState extends State<RoomPage> {
               break;
             }
             _debug('setRemoteDescription(answer)');
-            await _pc!.setRemoteDescription(RTCSessionDescription(sdp, 'answer'));
+            try {
+              await _pc!.setRemoteDescription(RTCSessionDescription(sdp, 'answer'));
+            } catch (e) {
+              _debug('SRD(answer) error: ' + e.toString());
+              _restartIceAndRenegotiate('srd_answer_error');
+              break;
+            }
             // Flush pending ICE
-            for (final cand in _pendingIce) {
-              await _pc!.addCandidate(RTCIceCandidate(
-                cand['candidate'] as String?,
-                cand['sdpMid'] as String?,
-                cand['sdpMLineIndex'] as int?,
-              ));
+            try {
+              for (final cand in _pendingIce) {
+                await _pc!.addCandidate(RTCIceCandidate(
+                  cand['candidate'] as String?,
+                  cand['sdpMid'] as String?,
+                  cand['sdpMLineIndex'] as int?,
+                ));
+              }
+            } catch (e) {
+              _debug('addCandidate after answer error: ' + e.toString());
             }
             _pendingIce.clear();
             _renegotiating = false;
@@ -737,52 +801,113 @@ class _RoomPageState extends State<RoomPage> {
 
   // Inbound RTP stats check and ICE-restart fallback
   void _scheduleInboundStatsCheck() {
-    Future.delayed(const Duration(seconds: 2), _checkInboundMediaOnce);
+    // Start periodic checks; guarded by _statsScheduled
+    if (!_statsScheduled) return;
+    _checkInboundMediaOnce();
   }
 
   Future<void> _checkInboundMediaOnce() async {
+    if (!_statsScheduled) return;
     try {
       final stats = await _pc?.getStats() ?? [];
-      int videoBytes = 0;
-      int audioBytes = 0;
+      int inboundVideoBytes = 0;
+      int inboundAudioBytes = 0;
+      int outboundVideoBytes = 0;
+      int outboundAudioBytes = 0;
       for (final r in stats) {
         try {
           final type = (r.type ?? '').toString();
           final values = r.values as Map?;
           if (type == 'inbound-rtp' && values != null) {
-            final kind = (values['kind'] ?? values['mediaType'] ?? '').toString();
-            final bytes = values['bytesReceived'] ?? 0;
-            final parsed = bytes is int ? bytes : int.tryParse(bytes.toString()) ?? 0;
-            if (kind == 'video') videoBytes = parsed;
-            if (kind == 'audio') audioBytes = parsed;
+            final kind = (values['mediaType'] ?? values['kind'] ?? '').toString();
+            final recv = values['bytesReceived'] ?? 0;
+            final recvParsed = recv is int ? recv : int.tryParse(recv.toString()) ?? 0;
+            if (kind == 'video') inboundVideoBytes += recvParsed;
+            if (kind == 'audio') inboundAudioBytes += recvParsed;
+          } else if (type == 'outbound-rtp' && values != null) {
+            final kind = (values['mediaType'] ?? values['kind'] ?? '').toString();
+            final sent = values['bytesSent'] ?? 0;
+            final sentParsed = sent is int ? sent : int.tryParse(sent.toString()) ?? 0;
+            if (kind == 'video') outboundVideoBytes += sentParsed;
+            if (kind == 'audio') outboundAudioBytes += sentParsed;
           }
         } catch (_) {}
       }
-      _debug('inbound bytes video=' + videoBytes.toString() + ' audio=' + audioBytes.toString());
-      // Update remote video UI state based on inbound bytes
-      if (videoBytes == 0 && audioBytes > 0) {
+
+      final now = DateTime.now();
+      final dt = _prevStatsAt == null ? 2.0 : now.difference(_prevStatsAt!).inMilliseconds / 1000.0;
+      final inboundVBitrate = ((inboundVideoBytes - _prevInboundVideoBytes).clamp(0, 1 << 31) / dt) * 8.0;
+      final inboundABitrate = ((inboundAudioBytes - _prevInboundAudioBytes).clamp(0, 1 << 31) / dt) * 8.0;
+      final outboundVBitrate = ((outboundVideoBytes - _prevOutboundVideoBytes).clamp(0, 1 << 31) / dt) * 8.0;
+      final outboundABitrate = ((outboundAudioBytes - _prevOutboundAudioBytes).clamp(0, 1 << 31) / dt) * 8.0;
+
+      _prevStatsAt = now;
+      _prevInboundVideoBytes = inboundVideoBytes;
+      _prevInboundAudioBytes = inboundAudioBytes;
+      _prevOutboundVideoBytes = outboundVideoBytes;
+      _prevOutboundAudioBytes = outboundAudioBytes;
+
+      _debug('stats inbound bytes v=' + inboundVideoBytes.toString() + ' a=' + inboundAudioBytes.toString() +
+          ' | inbound kbps v=' + (inboundVBitrate / 1000).toStringAsFixed(1) + ' a=' + (inboundABitrate / 1000).toStringAsFixed(1) +
+          ' | outbound kbps v=' + (outboundVBitrate / 1000).toStringAsFixed(1) + ' a=' + (outboundABitrate / 1000).toStringAsFixed(1));
+
+      // Update remote video UI based on inbound video traffic
+      if (inboundVideoBytes == 0 && inboundAudioBytes > 0) {
         setState(() => _remoteVideoEnabled = false);
-      } else if (videoBytes > 0) {
+      } else if (inboundVideoBytes > 0) {
         setState(() => _remoteVideoEnabled = true);
       }
-      // If both are zero, attempt recovery
-      if (videoBytes == 0 && audioBytes == 0) {
-        _restartIceAndRenegotiate('no_inbound_media');
+
+      // Recovery heuristics
+      if (inboundVideoBytes == 0 && inboundAudioBytes == 0) {
+        _qualityLowCount++;
+        if (_qualityLowCount >= 2) {
+          _restartIceAndRenegotiate('no_inbound_media');
+          _qualityLowCount = 0;
+        }
+      } else {
+        // Low video bitrate while audio ok: likely degraded video
+        final lowVideo = inboundVBitrate < 30000 && inboundABitrate > 1000; // <30kbps video
+        if (lowVideo) {
+          _qualityLowCount++;
+          if (_qualityLowCount >= 3) {
+            _restartIceAndRenegotiate('low_video_bitrate');
+            _qualityLowCount = 0;
+          }
+        } else {
+          _qualityLowCount = 0;
+        }
       }
-    } catch (_) {}
+    } catch (e) {
+      _debug('stats error: ' + e.toString());
+    } finally {
+      if (_statsScheduled) {
+        Future.delayed(const Duration(seconds: 2), _checkInboundMediaOnce);
+      }
+    }
   }
 
   Future<void> _restartIceAndRenegotiate(String reason) async {
     if (_pc == null) return;
     final now = DateTime.now();
     if (_renegotiating) return;
-    if (_lastRenegotiateAt != null && now.difference(_lastRenegotiateAt!).inSeconds < 10) {
+    // Cap restart attempts to avoid loops
+    if (_iceRestartAttempts >= 3) {
+      _debug('Skip renegotiate, max attempts reached');
+      return;
+    }
+    // Debounce renegotiation requests
+    if (_lastRenegotiateAt != null && now.difference(_lastRenegotiateAt!).inSeconds < 5) {
       return;
     }
     _renegotiating = true;
     _lastRenegotiateAt = now;
+    _iceRestartAttempts++;
+    _negotiationSeq++;
     try {
-      _debug('Renegotiate: ' + reason);
+      final delayMs = (_iceRestartAttempts - 1) * 1000; // 0,1s,2s backoff
+      if (delayMs > 0) await Future.delayed(Duration(milliseconds: delayMs));
+      _debug('Renegotiate #' + _negotiationSeq.toString() + ' (' + reason + ') attempt=' + _iceRestartAttempts.toString());
       final offer = await _pc!.createOffer({'iceRestart': true});
       await _pc!.setLocalDescription(offer);
       _send({
