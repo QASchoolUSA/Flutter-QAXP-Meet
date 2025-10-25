@@ -4,6 +4,7 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'dart:convert';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'dart:async';
+import 'pages/room_page.dart' as pages;
 
 void main() {
   runApp(const MyApp());
@@ -31,12 +32,40 @@ class HomePage extends StatefulWidget {
 
 class _HomePageState extends State<HomePage> {
   final _roomController = TextEditingController();
+  static final RegExp _roomNameRegex = RegExp(r'^[a-zA-Z0-9_-]{3,64}$');
+  String? _roomError;
+  bool _isRoomValid = false;
+
+  void _validateRoomName(String value) {
+    final room = value.trim();
+    if (room.isEmpty) {
+      setState(() {
+        _isRoomValid = false;
+        _roomError = 'Room name is required';
+      });
+      return;
+    }
+    final ok = _roomNameRegex.hasMatch(room);
+    setState(() {
+      _isRoomValid = ok;
+      _roomError = ok ? null : '3–64 chars: letters, numbers, - or _';
+    });
+  }
 
   void _enterRoom() {
     final room = _roomController.text.trim();
-    if (room.isEmpty) return;
+    if (!_roomNameRegex.hasMatch(room)) {
+      setState(() {
+        _isRoomValid = false;
+        _roomError = '3–64 chars: letters, numbers, - or _';
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Invalid room name')),
+      );
+      return;
+    }
     Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => RoomPage(roomName: room)),
+      MaterialPageRoute(builder: (_) => pages.RoomPage(roomName: room)),
     );
   }
 
@@ -81,11 +110,13 @@ class _HomePageState extends State<HomePage> {
                       controller: _roomController,
                       textInputAction: TextInputAction.go,
                       onSubmitted: (_) => _enterRoom(),
+                      onChanged: _validateRoomName,
                       decoration: InputDecoration(
                         labelText: 'Room name',
                         hintText: 'e.g. standup-10am',
                         border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
                         prefixIcon: const Icon(Icons.meeting_room),
+                        errorText: _roomError,
                       ),
                     ),
                     const SizedBox(height: 16),
@@ -93,7 +124,7 @@ class _HomePageState extends State<HomePage> {
                       children: [
                         Expanded(
                           child: ElevatedButton.icon(
-                            onPressed: _enterRoom,
+                            onPressed: _isRoomValid ? _enterRoom : null,
                             icon: const Icon(Icons.play_arrow),
                             label: const Text('Enter'),
                             style: ElevatedButton.styleFrom(
@@ -231,10 +262,15 @@ class _RoomPageState extends State<RoomPage> {
   }
 
   Future<void> _setupSignalingAndRTC() async {
-    // Create RTCPeerConnection with a public STUN server
+    // Create RTCPeerConnection with STUN and TURN servers
     final configuration = {
       'iceServers': [
-        {'urls': 'stun:stun.l.google.com:19302'},
+        {'urls': ['stun:stun.l.google.com:19302']},
+        {
+          'urls': ['turn:turn.example.com:3478'],
+          'username': 'user',
+          'credential': 'pass'
+        },
       ],
       'sdpSemantics': 'unified-plan',
     };
@@ -1018,15 +1054,15 @@ class _RoomPageState extends State<RoomPage> {
         focusNode: _focusMicToggle,
         onPressed: _toggleMic,
         style: ButtonStyle(
-          shape: MaterialStateProperty.all(const CircleBorder()),
-          padding: MaterialStateProperty.all(const EdgeInsets.all(14)),
-          elevation: MaterialStateProperty.resolveWith((states) =>
-              states.contains(MaterialState.hovered) ? 6 : 0),
-          backgroundColor: MaterialStateProperty.resolveWith((states) =>
-              states.contains(MaterialState.pressed)
-                  ? Colors.white.withOpacity(0.16)
-                  : Colors.white.withOpacity(0.10)),
-          foregroundColor: MaterialStateProperty.all(Colors.white),
+          shape: WidgetStateProperty.all(const CircleBorder()),
+          padding: WidgetStateProperty.all(const EdgeInsets.all(14)),
+          elevation: WidgetStateProperty.resolveWith((states) =>
+              states.contains(WidgetState.hovered) ? 6 : 0),
+          backgroundColor: WidgetStateProperty.resolveWith((states) =>
+              states.contains(WidgetState.pressed)
+                  ? Colors.white.withValues(alpha: 0.16)
+                  : Colors.white.withValues(alpha: 0.10)),
+          foregroundColor: WidgetStateProperty.all(Colors.white),
         ),
         child: Icon(_micEnabled ? Icons.mic : Icons.mic_off),
       ),
@@ -1039,7 +1075,7 @@ class _RoomPageState extends State<RoomPage> {
         focusNode: _focusMicMenu,
         child: Container(
           decoration: BoxDecoration(
-            color: Colors.white.withOpacity(0.10),
+            color: Colors.white.withValues(alpha: 0.10),
             shape: BoxShape.circle,
             boxShadow: const [
               BoxShadow(color: Colors.black26, blurRadius: 8, offset: Offset(0, 2)),
@@ -1096,15 +1132,15 @@ class _RoomPageState extends State<RoomPage> {
         focusNode: _focusCamToggle,
         onPressed: _toggleVideo,
         style: ButtonStyle(
-          shape: MaterialStateProperty.all(const CircleBorder()),
-          padding: MaterialStateProperty.all(const EdgeInsets.all(14)),
-          elevation: MaterialStateProperty.resolveWith((states) =>
-              states.contains(MaterialState.hovered) ? 6 : 0),
-          backgroundColor: MaterialStateProperty.resolveWith((states) =>
-              states.contains(MaterialState.pressed)
-                  ? Colors.white.withOpacity(0.16)
-                  : Colors.white.withOpacity(0.10)),
-          foregroundColor: MaterialStateProperty.all(Colors.white),
+          shape: WidgetStateProperty.all(const CircleBorder()),
+          padding: WidgetStateProperty.all(const EdgeInsets.all(14)),
+          elevation: WidgetStateProperty.resolveWith((states) =>
+              states.contains(WidgetState.hovered) ? 6 : 0),
+          backgroundColor: WidgetStateProperty.resolveWith((states) =>
+              states.contains(WidgetState.pressed)
+                  ? Colors.white.withValues(alpha: 0.16)
+                  : Colors.white.withValues(alpha: 0.10)),
+          foregroundColor: WidgetStateProperty.all(Colors.white),
         ),
         child: Icon(_videoEnabled ? Icons.videocam : Icons.videocam_off),
       ),
@@ -1117,7 +1153,7 @@ class _RoomPageState extends State<RoomPage> {
         focusNode: _focusCamMenu,
         child: Container(
           decoration: BoxDecoration(
-            color: Colors.white.withOpacity(0.10),
+            color: Colors.white.withValues(alpha: 0.10),
             shape: BoxShape.circle,
             boxShadow: const [
               BoxShadow(color: Colors.black26, blurRadius: 8, offset: Offset(0, 2)),
@@ -1173,12 +1209,12 @@ class _RoomPageState extends State<RoomPage> {
       child: ElevatedButton(
         focusNode: _focusHangup,
         style: ButtonStyle(
-          shape: MaterialStateProperty.all(const CircleBorder()),
-          padding: MaterialStateProperty.all(const EdgeInsets.all(16)),
-          elevation: MaterialStateProperty.resolveWith((states) =>
-              states.contains(MaterialState.hovered) ? 8 : 0),
-          backgroundColor: MaterialStateProperty.all(const Color(0xFFE53935)),
-          foregroundColor: MaterialStateProperty.all(Colors.white),
+          shape: WidgetStateProperty.all(const CircleBorder()),
+          padding: WidgetStateProperty.all(const EdgeInsets.all(16)),
+          elevation: WidgetStateProperty.resolveWith((states) =>
+              states.contains(WidgetState.hovered) ? 8 : 0),
+          backgroundColor: WidgetStateProperty.all(const Color(0xFFE53935)),
+          foregroundColor: WidgetStateProperty.all(Colors.white),
         ),
         onPressed: _hangup,
         child: const Icon(Icons.call_end),
@@ -1232,7 +1268,7 @@ class _RoomPageState extends State<RoomPage> {
                 child: Container(
                   padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
                   decoration: BoxDecoration(
-                    color: Colors.black.withOpacity(0.55),
+                    color: Colors.black.withValues(alpha: 0.55),
                     borderRadius: BorderRadius.circular(28),
                     boxShadow: const [
                       BoxShadow(color: Colors.black26, blurRadius: 16, offset: Offset(0, 8)),
