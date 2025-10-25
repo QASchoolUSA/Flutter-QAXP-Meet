@@ -171,6 +171,7 @@ class _RoomPageState extends State<RoomPage> {
   bool _renegotiating = false;
   DateTime? _lastRenegotiateAt;
   bool _remoteVideoEnabled = true;
+  bool _statsScheduled = false;
 
   void _debug(String message) {
     print('[meet] ' + message);
@@ -247,16 +248,67 @@ class _RoomPageState extends State<RoomPage> {
       _debug('ICE state: ' + state.toString());
       if (state == RTCIceConnectionState.RTCIceConnectionStateConnected) {
         _attachRemoteReceivers();
-        _scheduleInboundStatsCheck();
+        if (!_statsScheduled) {
+          _statsScheduled = true;
+          _scheduleInboundStatsCheck();
+        }
       } else if (state == RTCIceConnectionState.RTCIceConnectionStateFailed) {
         _restartIceAndRenegotiate('ice_failed');
+      } else if (state == RTCIceConnectionState.RTCIceConnectionStateDisconnected) {
+        _statsScheduled = false;
       }
     };
+
+    // Remove duplicate scheduling in onConnectionState
     _pc!.onConnectionState = (RTCPeerConnectionState state) {
       _debug('PC state: ' + state.toString());
-      if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
-        _scheduleInboundStatsCheck();
+      if (state == RTCPeerConnectionState.RTCPeerConnectionStateDisconnected) {
+        _statsScheduled = false;
       }
+    };
+
+    // Remote track handler: normalize to a single _remoteStream container
+    _pc!.onTrack = (RTCTrackEvent event) async {
+      _debug('onTrack kind=' + (event.track?.kind ?? 'unknown') + ' streams=' + event.streams.length.toString());
+      _remoteStream ??= await createLocalMediaStream('remote');
+      if (event.track != null) {
+        final exists = _remoteStream!.getTracks().any((t) => t.id == event.track!.id);
+        if (!exists) {
+          await _remoteStream!.addTrack(event.track!);
+        }
+      }
+      // If peer provided a stream, import its tracks into our container
+      if (event.streams.isNotEmpty) {
+        for (final s in event.streams) {
+          for (final t in s.getTracks()) {
+            final exists = _remoteStream!.getTracks().any((rt) => rt.id == t.id);
+            if (!exists) {
+              await _remoteStream!.addTrack(t);
+            }
+          }
+        }
+      }
+      _remoteRenderer.srcObject = _remoteStream;
+      setState(() {
+        _peerJoined = true;
+        if (event.track?.kind == 'video') {
+          _remoteVideoEnabled = true;
+        }
+      });
+    };
+
+    // Plan-B fallback: merge incoming stream tracks into our container
+    _pc!.onAddStream = (MediaStream stream) async {
+      _debug('onAddStream id=' + stream.id);
+      _remoteStream ??= await createLocalMediaStream('remote');
+      for (final t in stream.getTracks()) {
+        final exists = _remoteStream!.getTracks().any((rt) => rt.id == t.id);
+        if (!exists) {
+          await _remoteStream!.addTrack(t);
+        }
+      }
+      _remoteRenderer.srcObject = _remoteStream;
+      setState(() => _peerJoined = true);
     };
 
     // Add local tracks
@@ -267,34 +319,8 @@ class _RoomPageState extends State<RoomPage> {
       }
     }
 
-    // Remote track handler (Unified Plan)
-    _pc!.onTrack = (RTCTrackEvent event) async {
-      _debug('onTrack kind=' + (event.track?.kind ?? 'unknown') + ' streams=' + event.streams.length.toString());
-      MediaStream? stream;
-      if (event.streams.isNotEmpty) {
-        stream = event.streams.first;
-      } else if (event.track != null) {
-        _remoteStream ??= await createLocalMediaStream('remote');
-        await _remoteStream!.addTrack(event.track!);
-        stream = _remoteStream;
-      }
-      if (stream != null) {
-        _remoteRenderer.srcObject = stream;
-        setState(() {
-          _peerJoined = true;
-          if (event.track?.kind == 'video') {
-            _remoteVideoEnabled = true;
-          }
-        });
-      }
-    };
-
-    // Plan-B fallback (some browsers/servers)
-    _pc!.onAddStream = (MediaStream stream) {
-      _debug('onAddStream id=' + stream.id);
-      _remoteRenderer.srcObject = stream;
-      setState(() => _peerJoined = true);
-    };
+    // Remote track handler consolidated earlier to normalize into _remoteStream.
+    // Removed duplicate onTrack/onAddStream assignments.
 
     // ICE candidate handler: send to signaling server
     _pc!.onIceCandidate = (RTCIceCandidate candidate) {
@@ -396,6 +422,11 @@ class _RoomPageState extends State<RoomPage> {
                   {
                     final sdp = payload['sdp'] as String?;
                     if (sdp == null || _pc == null) break;
+                    final current = await _pc!.getRemoteDescription();
+                    if (current != null && current.type == 'answer') {
+                      _debug('skip duplicate answer');
+                      break;
+                    }
                     _debug('setRemoteDescription(answer)');
                     await _pc!.setRemoteDescription(RTCSessionDescription(sdp, 'answer'));
                     for (final cand in _pendingIce) {
@@ -495,6 +526,11 @@ class _RoomPageState extends State<RoomPage> {
             // Fallback for nested answer objects
             sdp ??= (msg['answer'] is Map ? (msg['answer']['sdp'] as String?) : null);
             if (sdp == null || _pc == null) break;
+            final current = await _pc!.getRemoteDescription();
+            if (current != null && current.type == 'answer') {
+              _debug('skip duplicate answer');
+              break;
+            }
             _debug('setRemoteDescription(answer)');
             await _pc!.setRemoteDescription(RTCSessionDescription(sdp, 'answer'));
             // Flush pending ICE
