@@ -60,6 +60,21 @@ class RtcSession extends ChangeNotifier {
     };
     _pc = await createPeerConnection(configuration);
 
+    // Ensure we are prepared to receive both audio and video, even before local tracks
+    try {
+      await _pc!.addTransceiver(
+        kind: RTCRtpMediaType.RTCRtpMediaTypeAudio,
+        init: RTCRtpTransceiverInit(direction: TransceiverDirection.SendRecv),
+      );
+      await _pc!.addTransceiver(
+        kind: RTCRtpMediaType.RTCRtpMediaTypeVideo,
+        init: RTCRtpTransceiverInit(direction: TransceiverDirection.SendRecv),
+      );
+      _log('Transceivers added: audio+video sendrecv');
+    } catch (e) {
+      _log('addTransceiver not supported or failed: $e');
+    }
+
     _pc!.onIceConnectionState = (RTCIceConnectionState state) {
       iceState = state;
       _log('ICE state: $state');
@@ -83,15 +98,25 @@ class RtcSession extends ChangeNotifier {
       });
     };
 
-    _pc!.onTrack = (RTCTrackEvent e) {
+    _pc!.onTrack = (RTCTrackEvent e) async {
       final kind = e.track.kind;
       _log('onTrack: kind=$kind id=${e.track.id} streams=${e.streams.length}');
-      if (e.streams.isNotEmpty) {
-        _remoteStream = e.streams.first;
+
+      // Some backends (SFU) deliver tracks with empty streams; attach manually
+      if (e.streams.isEmpty) {
+        _remoteStream ??= await createLocalMediaStream('remote');
+        _remoteStream!.addTrack(e.track);
         remoteRenderer.srcObject = _remoteStream;
-        _log('Remote stream attached: id=${_remoteStream!.id}');
+        _log('Remote ${kind} track attached via synthetic stream: id=${_remoteStream!.id}');
         notifyListeners();
+        return;
       }
+
+      // Default path: stream provided with track
+      _remoteStream = e.streams.first;
+      remoteRenderer.srcObject = _remoteStream;
+      _log('Remote stream attached: id=${_remoteStream!.id}');
+      notifyListeners();
     };
 
     // Attach existing local tracks if media already started
