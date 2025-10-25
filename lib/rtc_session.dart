@@ -557,20 +557,20 @@ class RtcSession extends ChangeNotifier {
       final fmtp = <int, String>{};
       final rtcpfb = <int, List<String>>{};
       for (final l in lines) {
-        final m1 = RegExp(r'^a=rtpmap:(\\d+)\\s+([A-Za-z0-9\-]+)/').firstMatch(l);
+        final m1 = RegExp(r'^a=rtpmap:(\d+)\s+([A-Za-z0-9\-]+)/').firstMatch(l);
         if (m1 != null) {
           final pt = int.parse(m1.group(1)!);
           final codec = (m1.group(2) ?? '').toUpperCase();
           rtpmap[pt] = codec;
           continue;
         }
-        final m2 = RegExp(r'^a=fmtp:(\\d+)\\s+(.+)$').firstMatch(l);
+        final m2 = RegExp(r'^a=fmtp:(\d+)\s+(.+)$').firstMatch(l);
         if (m2 != null) {
           final pt = int.parse(m2.group(1)!);
           fmtp[pt] = m2.group(2) ?? '';
           continue;
         }
-        final m3 = RegExp(r'^a=rtcp-fb:(\\d+)\\s+(.+)$').firstMatch(l);
+        final m3 = RegExp(r'^a=rtcp-fb:(\d+)\s+(.+)$').firstMatch(l);
         if (m3 != null) {
           final pt = int.parse(m3.group(1)!);
           (rtcpfb[pt] ??= []).add(m3.group(2) ?? '');
@@ -615,9 +615,9 @@ class RtcSession extends ChangeNotifier {
       final filtered = <String>[];
       for (final l in lines) {
         // Keep all non-codec lines and codec lines for allowed payload
-        final rmRtpmap = RegExp(r'^a=rtpmap:(\\d+)').firstMatch(l);
-        final rmFmtp = RegExp(r'^a=fmtp:(\\d+)').firstMatch(l);
-        final rmFb = RegExp(r'^a=rtcp-fb:(\\d+)').firstMatch(l);
+        final rmRtpmap = RegExp(r'^a=rtpmap:(\d+)').firstMatch(l);
+        final rmFmtp = RegExp(r'^a=fmtp:(\d+)').firstMatch(l);
+        final rmFb = RegExp(r'^a=rtcp-fb:(\d+)').firstMatch(l);
         if (rmRtpmap != null || rmFmtp != null || rmFb != null) {
           final pt = int.parse((rmRtpmap ?? rmFmtp ?? rmFb)!.group(1)!);
           if (!allowed.contains(pt)) {
