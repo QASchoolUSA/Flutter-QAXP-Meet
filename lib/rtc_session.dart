@@ -528,22 +528,41 @@ class RtcSession extends ChangeNotifier {
 
       // Map payload type -> codec name
       final rtpmap = <int, String>{};
+      // Map payload type -> fmtp line
+      final fmtp = <int, String>{};
       for (final l in lines) {
-        final m = RegExp(r'^a=rtpmap:(\\d+)\\s+([A-Za-z0-9\-]+)/').firstMatch(l);
-        if (m != null) {
-          final pt = int.parse(m.group(1)!);
-          final codec = (m.group(2) ?? '').toUpperCase();
+        final m1 = RegExp(r'^a=rtpmap:(\\d+)\\s+([A-Za-z0-9\-]+)/').firstMatch(l);
+        if (m1 != null) {
+          final pt = int.parse(m1.group(1)!);
+          final codec = (m1.group(2) ?? '').toUpperCase();
           rtpmap[pt] = codec;
+          continue;
+        }
+        final m2 = RegExp(r'^a=fmtp:(\\d+)\\s+(.+)$').firstMatch(l);
+        if (m2 != null) {
+          final pt = int.parse(m2.group(1)!);
+          fmtp[pt] = m2.group(2) ?? '';
         }
       }
 
-      final h264Pts = rtpmap.entries
+      List<int> h264Pts = rtpmap.entries
           .where((e) => e.value == 'H264')
           .map((e) => e.key)
           .toList();
       if (h264Pts.isEmpty) return sdp;
 
-      // Parse m=video payloads
+      int scorePt(int pt) {
+        final params = (fmtp[pt] ?? '').toLowerCase();
+        // Prefer packetization-mode=1
+        final pkt = params.contains('packetization-mode=1') ? 2 : 0;
+        // Prefer baseline profiles (42e0xx). Some browsers struggle with high/main.
+        final profMatch = RegExp(r'profile-level-id=([0-9a-fA-F]+)').firstMatch(params);
+        final prof = profMatch?.group(1)?.toLowerCase() ?? '';
+        final baseline = prof.startsWith('42e0') ? 3 : 0;
+        return baseline + pkt; // baseline weighted more than packetization
+      }
+
+      // Parse m=video payloads preserving original non-H264 order
       final parts = lines[mVideoIndex].split(' ');
       final header = parts.take(3).toList();
       final payloads = parts
@@ -552,13 +571,16 @@ class RtcSession extends ChangeNotifier {
           .whereType<int>()
           .toList();
 
-      // Reorder: H264 first, keep other payloads order
+      // Sort H264 by score descending, keep only ones present in m=video list
+      final h264Present = h264Pts.where((pt) => payloads.contains(pt)).toList();
+      h264Present.sort((a, b) => scorePt(b).compareTo(scorePt(a)));
+
       final reordered = [
-        ...h264Pts.where((pt) => payloads.contains(pt)),
-        ...payloads.where((pt) => !h264Pts.contains(pt)),
+        ...h264Present,
+        ...payloads.where((pt) => !h264Present.contains(pt)),
       ];
       lines[mVideoIndex] = '${header.join(' ')} ${reordered.join(' ')}';
-      _log('SDP munged: m=video payloads=${reordered.join(',')} H264 first');
+      _log('SDP munged: m=video payloads=${reordered.join(',')} H264 first (baseline preferred)');
       return lines.join('\n');
     } catch (_) {
       return sdp;

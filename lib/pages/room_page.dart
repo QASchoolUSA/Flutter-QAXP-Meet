@@ -164,7 +164,7 @@ class _RoomPageState extends State<RoomPage> {
       child: RTCVideoView(
         renderer,
         objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
-        mirror: true,
+        mirror: renderer == _session.localRenderer,
       ),
     );
   }
