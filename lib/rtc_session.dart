@@ -216,12 +216,14 @@ class RtcSession extends ChangeNotifier {
         await _pc?.setRemoteDescription(
             RTCSessionDescription(payload['sdp'], 'offer'));
         final answer = await _pc!.createAnswer();
-        await _pc!.setLocalDescription(answer);
-        _log('Answer(created): sdpLen=${answer.sdp?.length ?? 0}');
+        var sdpA = answer.sdp ?? '';
+        sdpA = _preferH264(sdpA);
+        await _pc!.setLocalDescription(RTCSessionDescription(sdpA, 'answer'));
+        _log('Answer(created): sdpLen=${sdpA.length}');
         _sig?.send({
           'type': 'signal',
           'room': _roomName,
-          'payload': {'type': 'answer', 'sdp': answer.sdp},
+          'payload': {'type': 'answer', 'sdp': sdpA},
         });
         _ensureRemoteReceiving();
         return;
