@@ -297,8 +297,14 @@ class RtcSession extends ChangeNotifier {
         break;
       case 'ready':
       case 'start_negotiation':
-        _log('Negotiation trigger: $type');
-        _startCall();
+        final isIOS = defaultTargetPlatform == TargetPlatform.iOS;
+        if (isIOS) {
+          _log('Negotiation trigger: $type (iOS will offer)');
+          _startCall();
+        } else {
+          _log('Negotiation trigger: $type (non-iOS waits for remote offer)');
+          // Do not create offer here; expect remote iOS peer to offer with H264
+        }
         break;
       case 'ws_closed':
         wsConnected = false;
