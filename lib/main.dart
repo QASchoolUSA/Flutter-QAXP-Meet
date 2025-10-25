@@ -240,16 +240,18 @@ class _RoomPageState extends State<RoomPage> {
     };
     _pc = await createPeerConnection(configuration);
 
-    // Explicit transceivers to ensure recv slots for remote media
+    // Only pre-create receive transceivers when we have no local media yet
     try {
-      await _pc!.addTransceiver(
-        kind: RTCRtpMediaType.RTCRtpMediaTypeAudio,
-        init: RTCRtpTransceiverInit(direction: TransceiverDirection.SendRecv),
-      );
-      await _pc!.addTransceiver(
-        kind: RTCRtpMediaType.RTCRtpMediaTypeVideo,
-        init: RTCRtpTransceiverInit(direction: TransceiverDirection.SendRecv),
-      );
+      if (_localStream == null) {
+        await _pc!.addTransceiver(
+          kind: RTCRtpMediaType.RTCRtpMediaTypeAudio,
+          init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
+        );
+        await _pc!.addTransceiver(
+          kind: RTCRtpMediaType.RTCRtpMediaTypeVideo,
+          init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
+        );
+      }
     } catch (_) {}
 
     _pc!.onIceConnectionState = (RTCIceConnectionState state) {
