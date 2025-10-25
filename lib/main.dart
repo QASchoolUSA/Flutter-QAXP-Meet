@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'dart:convert';
 import 'package:web_socket_channel/web_socket_channel.dart';
+import 'dart:async';
 
 void main() {
   runApp(const MyApp());
@@ -167,6 +168,8 @@ class _RoomPageState extends State<RoomPage> {
   List<MediaDeviceInfo> _videoInputs = [];
   String? _selectedMicId;
   String? _selectedCamId;
+  bool _renegotiating = false;
+  DateTime? _lastRenegotiateAt;
 
   void _debug(String message) {
     print('[meet] ' + message);
@@ -227,11 +230,31 @@ class _RoomPageState extends State<RoomPage> {
     };
     _pc = await createPeerConnection(configuration);
 
+    // Explicit transceivers to ensure recv slots for remote media
+    try {
+      await _pc!.addTransceiver(
+        kind: RTCRtpMediaType.RTCRtpMediaTypeAudio,
+        init: RTCRtpTransceiverInit(direction: TransceiverDirection.SendRecv),
+      );
+      await _pc!.addTransceiver(
+        kind: RTCRtpMediaType.RTCRtpMediaTypeVideo,
+        init: RTCRtpTransceiverInit(direction: TransceiverDirection.SendRecv),
+      );
+    } catch (_) {}
+
     _pc!.onIceConnectionState = (RTCIceConnectionState state) {
       _debug('ICE state: ' + state.toString());
+      if (state == RTCIceConnectionState.RTCIceConnectionStateConnected) {
+        _scheduleInboundStatsCheck();
+      } else if (state == RTCIceConnectionState.RTCIceConnectionStateFailed) {
+        _restartIceAndRenegotiate('ice_failed');
+      }
     };
     _pc!.onConnectionState = (RTCPeerConnectionState state) {
       _debug('PC state: ' + state.toString());
+      if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
+        _scheduleInboundStatsCheck();
+      }
     };
 
     // Add local tracks
@@ -621,6 +644,66 @@ class _RoomPageState extends State<RoomPage> {
     await _remoteRenderer.dispose();
     await _localStream?.dispose();
     if (mounted) Navigator.of(context).pop();
+  }
+
+  // Inbound RTP stats check and ICE-restart fallback
+  void _scheduleInboundStatsCheck() {
+    Future.delayed(const Duration(seconds: 2), _checkInboundMediaOnce);
+  }
+
+  Future<void> _checkInboundMediaOnce() async {
+    try {
+      final stats = await _pc?.getStats() ?? [];
+      int videoBytes = 0;
+      int audioBytes = 0;
+      for (final r in stats) {
+        try {
+          final type = (r.type ?? '').toString();
+          final values = r.values as Map?;
+          if (type == 'inbound-rtp' && values != null) {
+            final kind = (values['kind'] ?? values['mediaType'] ?? '').toString();
+            final bytes = values['bytesReceived'] ?? 0;
+            final parsed = bytes is int ? bytes : int.tryParse(bytes.toString()) ?? 0;
+            if (kind == 'video') videoBytes = parsed;
+            if (kind == 'audio') audioBytes = parsed;
+          }
+        } catch (_) {}
+      }
+      _debug('inbound bytes video=' + videoBytes.toString() + ' audio=' + audioBytes.toString());
+      if (videoBytes == 0 && audioBytes == 0) {
+        _restartIceAndRenegotiate('no_inbound_media');
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _restartIceAndRenegotiate(String reason) async {
+    if (_pc == null) return;
+    final now = DateTime.now();
+    if (_renegotiating) return;
+    if (_lastRenegotiateAt != null && now.difference(_lastRenegotiateAt!).inSeconds < 10) {
+      return;
+    }
+    _renegotiating = true;
+    _lastRenegotiateAt = now;
+    try {
+      _debug('Renegotiate: ' + reason);
+      final offer = await _pc!.createOffer({'iceRestart': true});
+      await _pc!.setLocalDescription(offer);
+      _send({
+        'type': 'signal',
+        'room': widget.roomName,
+        'payload': {
+          'type': 'offer',
+          'sdp': offer.sdp,
+        }
+      });
+    } catch (e) {
+      _debug('Renegotiate error: ' + e.toString());
+    } finally {
+      Future.delayed(const Duration(seconds: 3), () {
+        _renegotiating = false;
+      });
+    }
   }
 
   @override
