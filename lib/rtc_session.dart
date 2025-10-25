@@ -60,20 +60,8 @@ class RtcSession extends ChangeNotifier {
     };
     _pc = await createPeerConnection(configuration);
 
-    // Ensure we are prepared to receive both audio and video, even before local tracks
-    try {
-      await _pc!.addTransceiver(
-        kind: RTCRtpMediaType.RTCRtpMediaTypeAudio,
-        init: RTCRtpTransceiverInit(direction: TransceiverDirection.SendRecv),
-      );
-      await _pc!.addTransceiver(
-        kind: RTCRtpMediaType.RTCRtpMediaTypeVideo,
-        init: RTCRtpTransceiverInit(direction: TransceiverDirection.SendRecv),
-      );
-      _log('Transceivers added: audio+video sendrecv');
-    } catch (e) {
-      _log('addTransceiver not supported or failed: $e');
-    }
+    // Removed explicit addTransceiver calls to avoid duplicate m-lines.
+    // Local tracks will create appropriate transceivers; remote tracks are handled in onTrack/onAddStream.
 
     _pc!.onIceConnectionState = (RTCIceConnectionState state) {
       iceState = state;
@@ -116,6 +104,14 @@ class RtcSession extends ChangeNotifier {
       _remoteStream = e.streams.first;
       remoteRenderer.srcObject = _remoteStream;
       _log('Remote stream attached: id=${_remoteStream!.id}');
+      notifyListeners();
+    };
+
+    // Fallback for older/Plan-B style backends
+    _pc!.onAddStream = (MediaStream stream) {
+      _remoteStream = stream;
+      remoteRenderer.srcObject = _remoteStream;
+      _log('onAddStream: remote stream attached: id=${_remoteStream!.id}');
       notifyListeners();
     };
 
