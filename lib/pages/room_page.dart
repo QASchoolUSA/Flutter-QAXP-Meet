@@ -60,7 +60,13 @@ class _RoomPageState extends State<RoomPage> {
       builder: (context, _) {
         return Scaffold(
           appBar: AppBar(
-            title: Text('Room: ${widget.roomName}'),
+            title: Text(
+              'Room: ${widget.roomName}',
+              style: const TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
             elevation: 0,
             backgroundColor: Colors.black,
           ),

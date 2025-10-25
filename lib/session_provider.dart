@@ -2,8 +2,7 @@ import 'package:flutter/widgets.dart';
 import 'rtc_session.dart';
 
 class RtcSessionProvider extends InheritedNotifier<RtcSession> {
-  const RtcSessionProvider({super.key, required RtcSession notifier, required Widget child})
-      : super(notifier: notifier, child: child);
+  const RtcSessionProvider({super.key, required super.notifier, required super.child});
 
   static RtcSession of(BuildContext context) {
     final provider = context.dependOnInheritedWidgetOfExactType<RtcSessionProvider>();

@@ -213,7 +213,7 @@ class _RoomPageState extends State<RoomPage> {
   DateTime? _prevStatsAt;
 
   void _debug(String message) {
-    print('[meet] ' + message);
+    debugPrint('[meet] $message');
   }
 
   @override
@@ -291,7 +291,7 @@ class _RoomPageState extends State<RoomPage> {
     } catch (_) {}
 
     _pc!.onIceConnectionState = (RTCIceConnectionState state) {
-      _debug('ICE state: ' + state.toString());
+      _debug('ICE state: $state');
       if (state == RTCIceConnectionState.RTCIceConnectionStateConnected) {
         _iceRestartAttempts = 0;
         _qualityLowCount = 0;
@@ -315,7 +315,7 @@ class _RoomPageState extends State<RoomPage> {
 
     // Remove duplicate scheduling in onConnectionState
     _pc!.onConnectionState = (RTCPeerConnectionState state) {
-      _debug('PC state: ' + state.toString());
+      _debug('PC state: $state');
       if (state == RTCPeerConnectionState.RTCPeerConnectionStateDisconnected) {
         _statsScheduled = false;
       }
@@ -323,29 +323,29 @@ class _RoomPageState extends State<RoomPage> {
 
     // Remote track handler: normalize to a single _remoteStream container
     _pc!.onTrack = (RTCTrackEvent event) async {
-      _debug('onTrack kind=' + (event.track?.kind ?? 'unknown') + ' streams=' + event.streams.length.toString());
+      _debug('onTrack kind=${event.track.kind} streams=${event.streams.length}');
       _remoteStream ??= await createLocalMediaStream('remote');
-      if (event.track != null) {
-        final exists = _remoteStream!.getTracks().any((t) => t.id == event.track!.id);
-        if (!exists) {
-          await _remoteStream!.addTrack(event.track!);
-        }
+      final remoteStream = _remoteStream!;
+      final track = event.track;
+      final exists = remoteStream.getTracks().any((t) => t.id == track.id);
+      if (!exists) {
+        await remoteStream.addTrack(track);
       }
       // If peer provided a stream, import its tracks into our container
       if (event.streams.isNotEmpty) {
         for (final s in event.streams) {
           for (final t in s.getTracks()) {
-            final exists = _remoteStream!.getTracks().any((rt) => rt.id == t.id);
-            if (!exists) {
-              await _remoteStream!.addTrack(t);
+            final exists2 = remoteStream.getTracks().any((rt) => rt.id == t.id);
+            if (!exists2) {
+              await remoteStream.addTrack(t);
             }
           }
         }
       }
-      _remoteRenderer.srcObject = _remoteStream;
+      _remoteRenderer.srcObject = remoteStream;
       setState(() {
         _peerJoined = true;
-        if (event.track?.kind == 'video') {
+        if (track.kind == 'video') {
           _remoteVideoEnabled = true;
         }
       });
@@ -353,15 +353,16 @@ class _RoomPageState extends State<RoomPage> {
 
     // Plan-B fallback: merge incoming stream tracks into our container
     _pc!.onAddStream = (MediaStream stream) async {
-      _debug('onAddStream id=' + stream.id);
+      _debug('onAddStream id=${stream.id}');
       _remoteStream ??= await createLocalMediaStream('remote');
+      final remoteStream = _remoteStream!;
       for (final t in stream.getTracks()) {
-        final exists = _remoteStream!.getTracks().any((rt) => rt.id == t.id);
+        final exists = remoteStream.getTracks().any((rt) => rt.id == t.id);
         if (!exists) {
-          await _remoteStream!.addTrack(t);
+          await remoteStream.addTrack(t);
         }
       }
-      _remoteRenderer.srcObject = _remoteStream;
+      _remoteRenderer.srcObject = remoteStream;
       setState(() => _peerJoined = true);
     };
 
@@ -397,16 +398,16 @@ class _RoomPageState extends State<RoomPage> {
     // Connect to signaling server via WebSocket
     try {
       final url = _endpointForRoom(widget.roomName);
-      _debug('Connecting WS: ' + url);
+      _debug('Connecting WS: $url');
       _channel = WebSocketChannel.connect(Uri.parse(url));
     } catch (e) {
-      _debug('WS connect error: ' + e.toString());
+      _debug('WS connect error: $e');
       // If connection fails, keep local preview
       return;
     }
 
     // Join the room
-    _debug('Join room: ' + widget.roomName);
+    _debug('Join room: ${widget.roomName}');
     _send({'type': 'join', 'room': widget.roomName});
 
     // Handle messages
@@ -416,17 +417,17 @@ class _RoomPageState extends State<RoomPage> {
         final text = data is String ? data.trim() : (data as String);
         msg = jsonDecode(text);
       } catch (e) {
-        _debug('WS recv non-JSON or parse error: ' + e.toString());
+        _debug('WS recv non-JSON or parse error: $e');
         return;
       }
 
       final type = (msg['type'] ?? '').toString();
-      _debug('recv: ' + type);
+      _debug('recv: $type');
 
       switch (type) {
         case 'joined':
           _role = (msg['role'] ?? '').toString();
-          _debug('joined as ' + (_role ?? ''));
+          _debug('joined as ${_role ?? ''}');
           break;
 
         case 'signal':
@@ -451,7 +452,7 @@ class _RoomPageState extends State<RoomPage> {
                     try {
                       await _pc!.setRemoteDescription(RTCSessionDescription(sdp, 'offer'));
                     } catch (e) {
-                      _debug('SRD(offer) error: ' + e.toString());
+                      _debug('SRD(offer) error: $e');
                       _restartIceAndRenegotiate('srd_offer_error');
                       break;
                     }
@@ -464,7 +465,7 @@ class _RoomPageState extends State<RoomPage> {
                         ));
                       }
                     } catch (e) {
-                      _debug('addCandidate after offer error: ' + e.toString());
+                      _debug('addCandidate after offer error: $e');
                     }
                     _pendingIce.clear();
                     await _attachRemoteReceivers();
@@ -484,7 +485,7 @@ class _RoomPageState extends State<RoomPage> {
                       _renegotiating = false;
                       _lastRenegotiateAt = DateTime.now();
                     } catch (e) {
-                      _debug('create/set answer error: ' + e.toString());
+                      _debug('create/set answer error: $e');
                     }
                   }
                   break;
@@ -501,7 +502,7 @@ class _RoomPageState extends State<RoomPage> {
                     try {
                       await _pc!.setRemoteDescription(RTCSessionDescription(sdp, 'answer'));
                     } catch (e) {
-                      _debug('SRD(answer) error: ' + e.toString());
+                      _debug('SRD(answer) error: $e');
                       _restartIceAndRenegotiate('srd_answer_error');
                       break;
                     }
@@ -514,7 +515,7 @@ class _RoomPageState extends State<RoomPage> {
                         ));
                       }
                     } catch (e) {
-                      _debug('addCandidate after answer error: ' + e.toString());
+                      _debug('addCandidate after answer error: $e');
                     }
                     _pendingIce.clear();
                     await _ensureRemoteReceiving();
@@ -580,7 +581,7 @@ class _RoomPageState extends State<RoomPage> {
             try {
               await _pc!.setRemoteDescription(RTCSessionDescription(sdp, 'offer'));
             } catch (e) {
-              _debug('SRD(offer) error: ' + e.toString());
+              _debug('SRD(offer) error: $e');
               _restartIceAndRenegotiate('srd_offer_error');
               break;
             }
@@ -594,7 +595,7 @@ class _RoomPageState extends State<RoomPage> {
                 ));
               }
             } catch (e) {
-              _debug('addCandidate after offer error: ' + e.toString());
+              _debug('addCandidate after offer error: $e');
             }
             _pendingIce.clear();
 
@@ -615,7 +616,7 @@ class _RoomPageState extends State<RoomPage> {
               _renegotiating = false;
               _lastRenegotiateAt = DateTime.now();
             } catch (e) {
-              _debug('create/set answer error: ' + e.toString());
+              _debug('create/set answer error: $e');
             }
           }
           break;
@@ -635,7 +636,7 @@ class _RoomPageState extends State<RoomPage> {
             try {
               await _pc!.setRemoteDescription(RTCSessionDescription(sdp, 'answer'));
             } catch (e) {
-              _debug('SRD(answer) error: ' + e.toString());
+              _debug('SRD(answer) error: $e');
               _restartIceAndRenegotiate('srd_answer_error');
               break;
             }
@@ -649,7 +650,7 @@ class _RoomPageState extends State<RoomPage> {
                 ));
               }
             } catch (e) {
-              _debug('addCandidate after answer error: ' + e.toString());
+              _debug('addCandidate after answer error: $e');
             }
             _pendingIce.clear();
             await _ensureRemoteReceiving();
@@ -689,7 +690,6 @@ class _RoomPageState extends State<RoomPage> {
           break;
 
         case 'leave':
-        case 'peer-left':
           // Remote hung up
           setState(() {
             _peerJoined = false;
@@ -702,7 +702,7 @@ class _RoomPageState extends State<RoomPage> {
       _debug('WS closed');
       // Channel closed – keep local preview
     }, onError: (e) {
-      _debug('WS error: ' + e.toString());
+      _debug('WS error: $e');
       // Errors – keep local preview
     });
   }
@@ -727,7 +727,7 @@ class _RoomPageState extends State<RoomPage> {
     try {
       _channel?.sink.add(jsonEncode(msg));
     } catch (e) {
-      _debug('WS send error: ' + e.toString());
+      _debug('WS send error: $e');
     }
   }
 
@@ -833,7 +833,7 @@ class _RoomPageState extends State<RoomPage> {
     try {
       await _startCall();
     } catch (e) {
-      _debug('start negotiation error: ' + e.toString());
+      _debug('start negotiation error: $e');
       _renegotiating = false;
     }
   }
@@ -847,15 +847,16 @@ class _RoomPageState extends State<RoomPage> {
 
   Future<void> _checkInboundMediaOnce() async {
     if (!_statsScheduled) return;
+    if (_pc == null) return;
     try {
-      final stats = await _pc?.getStats() ?? [];
+      final stats = await _pc!.getStats();
       int inboundVideoBytes = 0;
       int inboundAudioBytes = 0;
       int outboundVideoBytes = 0;
       int outboundAudioBytes = 0;
       for (final r in stats) {
         try {
-          final type = (r.type ?? '').toString();
+          final type = r.type.toString();
           final values = r.values as Map?;
           if (type == 'inbound-rtp' && values != null) {
             final kind = (values['mediaType'] ?? values['kind'] ?? '').toString();
@@ -886,9 +887,7 @@ class _RoomPageState extends State<RoomPage> {
       _prevOutboundVideoBytes = outboundVideoBytes;
       _prevOutboundAudioBytes = outboundAudioBytes;
 
-      _debug('stats inbound bytes v=' + inboundVideoBytes.toString() + ' a=' + inboundAudioBytes.toString() +
-          ' | inbound kbps v=' + (inboundVBitrate / 1000).toStringAsFixed(1) + ' a=' + (inboundABitrate / 1000).toStringAsFixed(1) +
-          ' | outbound kbps v=' + (outboundVBitrate / 1000).toStringAsFixed(1) + ' a=' + (outboundABitrate / 1000).toStringAsFixed(1));
+      _debug('stats inbound bytes v=$inboundVideoBytes a=$inboundAudioBytes | inbound kbps v=${(inboundVBitrate / 1000).toStringAsFixed(1)} a=${(inboundABitrate / 1000).toStringAsFixed(1)} | outbound kbps v=${(outboundVBitrate / 1000).toStringAsFixed(1)} a=${(outboundABitrate / 1000).toStringAsFixed(1)}');
 
       // Update remote video UI based on inbound video traffic
       if (inboundVideoBytes == 0 && inboundAudioBytes > 0) {
@@ -918,7 +917,7 @@ class _RoomPageState extends State<RoomPage> {
         }
       }
     } catch (e) {
-      _debug('stats error: ' + e.toString());
+      _debug('stats error: $e');
     } finally {
       if (_statsScheduled) {
         Future.delayed(const Duration(seconds: 2), _checkInboundMediaOnce);
@@ -946,7 +945,7 @@ class _RoomPageState extends State<RoomPage> {
     try {
       final delayMs = (_iceRestartAttempts - 1) * 1000; // 0,1s,2s backoff
       if (delayMs > 0) await Future.delayed(Duration(milliseconds: delayMs));
-      _debug('Renegotiate #' + _negotiationSeq.toString() + ' (' + reason + ') attempt=' + _iceRestartAttempts.toString());
+      _debug('Renegotiate #$_negotiationSeq ($reason) attempt=$_iceRestartAttempts');
       final offer = await _pc!.createOffer({'iceRestart': true});
       await _pc!.setLocalDescription(offer);
       _send({
@@ -958,7 +957,7 @@ class _RoomPageState extends State<RoomPage> {
         }
       });
     } catch (e) {
-      _debug('Renegotiate error: ' + e.toString());
+      _debug('Renegotiate error: $e');
     } finally {
       Future.delayed(const Duration(seconds: 3), () {
         _renegotiating = false;
@@ -992,7 +991,7 @@ class _RoomPageState extends State<RoomPage> {
       final receivers = await _pc?.getReceivers() ?? [];
       final hasVideo = receivers.any((r) => r.track?.kind == 'video');
       final hasAudio = receivers.any((r) => r.track?.kind == 'audio');
-      _debug('receivers count=' + receivers.length.toString() + ' hasVideo=' + hasVideo.toString() + ' hasAudio=' + hasAudio.toString());
+      _debug('receivers count=${receivers.length} hasVideo=$hasVideo hasAudio=$hasAudio');
       if (receivers.isNotEmpty) {
         await _attachRemoteReceivers();
         return;
@@ -1007,7 +1006,7 @@ class _RoomPageState extends State<RoomPage> {
         await _attachRemoteReceivers();
       }
     } catch (e) {
-      _debug('ensure remote receiving error: ' + e.toString());
+      _debug('ensure remote receiving error: $e');
     }
   }
 
