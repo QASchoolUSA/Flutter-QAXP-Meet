@@ -13,6 +13,7 @@ class RtcSession extends ChangeNotifier {
   // WebRTC state
   MediaStream? _localStream;
   MediaStream? _remoteStream;
+  MediaStream? _remoteVideoStream; // video-only container for renderer
   RTCPeerConnection? _pc;
   RTCIceConnectionState? iceState;
 
@@ -92,20 +93,32 @@ class RtcSession extends ChangeNotifier {
       final kind = e.track.kind;
       _log('onTrack: kind=$kind id=${e.track.id} streams=${e.streams.length}');
 
-      // Some backends (SFU) deliver tracks with empty streams; attach manually
-      if (e.streams.isEmpty) {
-        _remoteStream ??= await createLocalMediaStream('remote');
-        _remoteStream!.addTrack(e.track);
-        remoteRenderer.srcObject = _remoteStream;
-        _log('Remote ${kind} track attached via synthetic stream: id=${_remoteStream!.id}');
+      if (kind == 'video') {
+        _remoteVideoStream ??= await createLocalMediaStream('remotev');
+        final vstream = _remoteVideoStream!;
+        final exists = vstream.getVideoTracks().any((t) => t.id == e.track.id);
+        if (!exists) {
+          await vstream.addTrack(e.track);
+          _log('Remote video track attached to video-only stream: id=${e.track.id}');
+        }
+        remoteRenderer.srcObject = vstream;
         notifyListeners();
         return;
       }
 
-      // Default path: stream provided with track
-      _remoteStream = e.streams.first;
-      remoteRenderer.srcObject = _remoteStream;
-      _log('Remote stream attached: id=${_remoteStream!.id}');
+      // Audio or other tracks
+      if (e.streams.isEmpty) {
+        _remoteStream ??= await createLocalMediaStream('remote');
+        _remoteStream!.addTrack(e.track);
+        _log('Remote ${kind} track attached via synthetic stream: id=${_remoteStream!.id}');
+      } else {
+        _remoteStream = e.streams.first;
+        _log('Remote stream attached: id=${_remoteStream!.id}');
+      }
+      // Keep renderer pointed at video-only stream if present; otherwise use full stream
+      if (_remoteVideoStream == null) {
+        remoteRenderer.srcObject = _remoteStream;
+      }
       notifyListeners();
     };
 
