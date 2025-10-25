@@ -247,12 +247,14 @@ class RtcSession extends ChangeNotifier {
           await _pc?.setRemoteDescription(
               RTCSessionDescription(msg['sdp'], 'offer'));
           final answer = await _pc!.createAnswer();
-          await _pc!.setLocalDescription(answer);
-          _log('Answer created: sdpLen=${answer.sdp?.length ?? 0}');
+          var sdpA = answer.sdp ?? '';
+          sdpA = _preferH264(sdpA);
+          await _pc!.setLocalDescription(RTCSessionDescription(sdpA, 'answer'));
+          _log('Answer created: sdpLen=${sdpA.length}');
           _sig?.send({
             'type': 'signal',
             'room': _roomName,
-            'payload': {'type': 'answer', 'sdp': answer.sdp},
+            'payload': {'type': 'answer', 'sdp': sdpA},
           });
           _ensureRemoteReceiving();
         }
@@ -353,14 +355,17 @@ class RtcSession extends ChangeNotifier {
     try {
       _log('Creating offer...');
       final offer = await _pc!.createOffer();
-      _log('Offer created: sdpLen=${offer.sdp?.length ?? 0}');
-      await _pc!.setLocalDescription(offer);
+      var sdp = offer.sdp ?? '';
+      sdp = _preferH264(sdp);
+      final mungedOffer = RTCSessionDescription(sdp, 'offer');
+      _log('Offer created: sdpLen=${sdp.length}');
+      await _pc!.setLocalDescription(mungedOffer);
       _log('Local description set');
       // Send using server's expected signal wrapper
       _sig?.send({
         'type': 'signal',
         'room': _roomName,
-        'payload': {'type': 'offer', 'sdp': offer.sdp},
+        'payload': {'type': 'offer', 'sdp': sdp},
       });
       _log('Offer sent');
     } catch (e) {
@@ -373,11 +378,13 @@ class RtcSession extends ChangeNotifier {
     try {
       _log('ICE restart + renegotiate, reason=$reason');
       final offer = await _pc!.createOffer({'iceRestart': true});
-      await _pc!.setLocalDescription(offer);
+      var sdp = offer.sdp ?? '';
+      sdp = _preferH264(sdp);
+      await _pc!.setLocalDescription(RTCSessionDescription(sdp, 'offer'));
       _sig?.send({
         'type': 'signal',
         'room': _roomName,
-        'payload': {'type': 'offer', 'sdp': offer.sdp, 'reason': reason},
+        'payload': {'type': 'offer', 'sdp': sdp, 'reason': reason},
       });
     } catch (e) {
       _log('Renegotiate error: $e');
@@ -511,5 +518,50 @@ class RtcSession extends ChangeNotifier {
     // Re-enumerate devices after switching to ensure menu stays accurate
     await loadDevices();
     notifyListeners();
+  }
+
+  String _preferH264(String sdp) {
+    try {
+      final lines = sdp.split('\n');
+      final mVideoIndex = lines.indexWhere((l) => l.startsWith('m=video'));
+      if (mVideoIndex == -1) return sdp;
+
+      // Map payload type -> codec name
+      final rtpmap = <int, String>{};
+      for (final l in lines) {
+        final m = RegExp(r'^a=rtpmap:(\\d+)\\s+([A-Za-z0-9\-]+)/').firstMatch(l);
+        if (m != null) {
+          final pt = int.parse(m.group(1)!);
+          final codec = (m.group(2) ?? '').toUpperCase();
+          rtpmap[pt] = codec;
+        }
+      }
+
+      final h264Pts = rtpmap.entries
+          .where((e) => e.value == 'H264')
+          .map((e) => e.key)
+          .toList();
+      if (h264Pts.isEmpty) return sdp;
+
+      // Parse m=video payloads
+      final parts = lines[mVideoIndex].split(' ');
+      final header = parts.take(3).toList();
+      final payloads = parts
+          .skip(3)
+          .map((p) => int.tryParse(p))
+          .whereType<int>()
+          .toList();
+
+      // Reorder: H264 first, keep other payloads order
+      final reordered = [
+        ...h264Pts.where((pt) => payloads.contains(pt)),
+        ...payloads.where((pt) => !h264Pts.contains(pt)),
+      ];
+      lines[mVideoIndex] = '${header.join(' ')} ${reordered.join(' ')}';
+      _log('SDP munged: m=video payloads=${reordered.join(',')} H264 first');
+      return lines.join('\n');
+    } catch (_) {
+      return sdp;
+    }
   }
 }
