@@ -170,6 +170,7 @@ class _RoomPageState extends State<RoomPage> {
   String? _selectedCamId;
   bool _renegotiating = false;
   DateTime? _lastRenegotiateAt;
+  bool _remoteVideoEnabled = true;
 
   void _debug(String message) {
     print('[meet] ' + message);
@@ -280,6 +281,9 @@ class _RoomPageState extends State<RoomPage> {
         _remoteRenderer.srcObject = stream;
         setState(() {
           _peerJoined = true;
+          if (event.track?.kind == 'video') {
+            _remoteVideoEnabled = true;
+          }
         });
       }
     };
@@ -350,6 +354,14 @@ class _RoomPageState extends State<RoomPage> {
             if (payload is Map<String, dynamic>) {
               final ptype = (payload['type'] ?? '').toString();
               switch (ptype) {
+                case 'video_state':
+                  {
+                    final enabled = payload['enabled'] == true;
+                    setState(() => _remoteVideoEnabled = enabled);
+                    // Refresh stats check to reflect new state promptly
+                    _scheduleInboundStatsCheck();
+                  }
+                  break;
                 case 'offer':
                   {
                     final sdp = payload['sdp'] as String?;
@@ -581,6 +593,15 @@ class _RoomPageState extends State<RoomPage> {
     for (var t in tracks) {
       t.enabled = _videoEnabled;
     }
+    // Signal remote to update UI immediately
+    _send({
+      'type': 'signal',
+      'room': widget.roomName,
+      'payload': {
+        'type': 'video_state',
+        'enabled': _videoEnabled,
+      }
+    });
   }
 
   Future<void> _switchCameraTo(String deviceId) async {
@@ -670,6 +691,13 @@ class _RoomPageState extends State<RoomPage> {
         } catch (_) {}
       }
       _debug('inbound bytes video=' + videoBytes.toString() + ' audio=' + audioBytes.toString());
+      // Update remote video UI state based on inbound bytes
+      if (videoBytes == 0 && audioBytes > 0) {
+        setState(() => _remoteVideoEnabled = false);
+      } else if (videoBytes > 0) {
+        setState(() => _remoteVideoEnabled = true);
+      }
+      // If both are zero, attempt recovery
       if (videoBytes == 0 && audioBytes == 0) {
         _restartIceAndRenegotiate('no_inbound_media');
       }
@@ -713,6 +741,7 @@ class _RoomPageState extends State<RoomPage> {
   }
 
   Widget _videoView(RTCVideoRenderer renderer, String label) {
+    final showOff = (label == 'remote' && !_remoteVideoEnabled) || (label == 'local' && !_videoEnabled);
     return GestureDetector(
       onDoubleTap: () => _toggleExpand(label),
       child: Container(
@@ -723,7 +752,16 @@ class _RoomPageState extends State<RoomPage> {
         ),
         child: ClipRRect(
           borderRadius: BorderRadius.circular(12),
-          child: RTCVideoView(renderer, mirror: label == 'local'),
+          child: Stack(children: [
+            RTCVideoView(renderer, mirror: label == 'local'),
+            if (showOff)
+              Container(
+                color: Colors.black54,
+                child: const Center(
+                  child: Icon(Icons.videocam_off, size: 72, color: Colors.white70),
+                ),
+              ),
+          ]),
         ),
       ),
     );
