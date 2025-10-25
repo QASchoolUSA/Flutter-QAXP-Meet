@@ -257,7 +257,7 @@ class _RoomPageState extends State<RoomPage> {
       if (state == RTCIceConnectionState.RTCIceConnectionStateConnected) {
         _iceRestartAttempts = 0;
         _qualityLowCount = 0;
-        _attachRemoteReceivers();
+        _ensureRemoteReceiving();
         if (!_statsScheduled) {
           _statsScheduled = true;
           _scheduleInboundStatsCheck();
@@ -479,7 +479,7 @@ class _RoomPageState extends State<RoomPage> {
                       _debug('addCandidate after answer error: ' + e.toString());
                     }
                     _pendingIce.clear();
-                    await _attachRemoteReceivers();
+                    await _ensureRemoteReceiving();
                     _renegotiating = false;
                     _lastRenegotiateAt = DateTime.now();
                   }
@@ -614,6 +614,7 @@ class _RoomPageState extends State<RoomPage> {
               _debug('addCandidate after answer error: ' + e.toString());
             }
             _pendingIce.clear();
+            await _ensureRemoteReceiving();
             _renegotiating = false;
             _lastRenegotiateAt = DateTime.now();
           }
@@ -946,6 +947,30 @@ class _RoomPageState extends State<RoomPage> {
         setState(() => _peerJoined = true);
       }
     } catch (_) {}
+  }
+
+  Future<void> _ensureRemoteReceiving() async {
+    try {
+      final receivers = await _pc?.getReceivers() ?? [];
+      final hasVideo = receivers.any((r) => r.track?.kind == 'video');
+      final hasAudio = receivers.any((r) => r.track?.kind == 'audio');
+      _debug('receivers count=' + receivers.length.toString() + ' hasVideo=' + hasVideo.toString() + ' hasAudio=' + hasAudio.toString());
+      if (receivers.isNotEmpty) {
+        await _attachRemoteReceivers();
+        return;
+      }
+      // Give the remote a short moment to bind tracks after SRD/ICE connected
+      await Future.delayed(const Duration(milliseconds: 800));
+      final receivers2 = await _pc?.getReceivers() ?? [];
+      if (receivers2.isEmpty) {
+        _debug('no remote receivers; triggering recovery');
+        _restartIceAndRenegotiate('no_remote_receivers');
+      } else {
+        await _attachRemoteReceivers();
+      }
+    } catch (e) {
+      _debug('ensure remote receiving error: ' + e.toString());
+    }
   }
 
   @override
