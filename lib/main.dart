@@ -416,6 +416,8 @@ class _RoomPageState extends State<RoomPage> {
                         'sdp': answer.sdp,
                       }
                     });
+                    _renegotiating = false;
+                    _lastRenegotiateAt = DateTime.now();
                   }
                   break;
                 case 'answer':
@@ -438,6 +440,8 @@ class _RoomPageState extends State<RoomPage> {
                     }
                     _pendingIce.clear();
                     await _attachRemoteReceivers();
+                    _renegotiating = false;
+                    _lastRenegotiateAt = DateTime.now();
                   }
                   break;
                 case 'candidate':
@@ -470,11 +474,13 @@ class _RoomPageState extends State<RoomPage> {
 
         case 'peer-joined':
         case 'peer_joined':
+          setState(() => _peerJoined = true);
+          break;
         case 'ready':
         case 'nudge':
         case 'start_negotiation':
         case 'start-negotiation':
-          await _startCall();
+          await _maybeStartNegotiation();
           break;
 
         case 'peer-left':
@@ -517,6 +523,8 @@ class _RoomPageState extends State<RoomPage> {
                 'sdp': answer.sdp,
               }
             });
+            _renegotiating = false;
+            _lastRenegotiateAt = DateTime.now();
           }
           break;
 
@@ -542,6 +550,8 @@ class _RoomPageState extends State<RoomPage> {
               ));
             }
             _pendingIce.clear();
+            _renegotiating = false;
+            _lastRenegotiateAt = DateTime.now();
           }
           break;
 
@@ -704,6 +714,25 @@ class _RoomPageState extends State<RoomPage> {
     await _remoteRenderer.dispose();
     await _localStream?.dispose();
     if (mounted) Navigator.of(context).pop();
+  }
+
+  Future<void> _maybeStartNegotiation() async {
+    if (_renegotiating) {
+      _debug('skip negotiation: already in progress');
+      return;
+    }
+    final now = DateTime.now();
+    if (_lastRenegotiateAt != null && now.difference(_lastRenegotiateAt!).inSeconds < 2) {
+      _debug('skip negotiation: too soon');
+      return;
+    }
+    _renegotiating = true;
+    try {
+      await _startCall();
+    } catch (e) {
+      _debug('start negotiation error: ' + e.toString());
+      _renegotiating = false;
+    }
   }
 
   // Inbound RTP stats check and ICE-restart fallback
