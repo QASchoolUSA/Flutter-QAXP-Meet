@@ -246,6 +246,7 @@ class _RoomPageState extends State<RoomPage> {
     _pc!.onIceConnectionState = (RTCIceConnectionState state) {
       _debug('ICE state: ' + state.toString());
       if (state == RTCIceConnectionState.RTCIceConnectionStateConnected) {
+        _attachRemoteReceivers();
         _scheduleInboundStatsCheck();
       } else if (state == RTCIceConnectionState.RTCIceConnectionStateFailed) {
         _restartIceAndRenegotiate('ice_failed');
@@ -376,6 +377,7 @@ class _RoomPageState extends State<RoomPage> {
                       ));
                     }
                     _pendingIce.clear();
+                    await _attachRemoteReceivers();
 
                     final answer = await _pc!.createAnswer();
                     await _pc!.setLocalDescription(answer);
@@ -404,6 +406,7 @@ class _RoomPageState extends State<RoomPage> {
                       ));
                     }
                     _pendingIce.clear();
+                    await _attachRemoteReceivers();
                   }
                   break;
                 case 'candidate':
@@ -732,6 +735,27 @@ class _RoomPageState extends State<RoomPage> {
         _renegotiating = false;
       });
     }
+  }
+
+  Future<void> _attachRemoteReceivers() async {
+    try {
+      final receivers = await _pc?.getReceivers() ?? [];
+      if (receivers.isEmpty) return;
+      _remoteStream ??= await createLocalMediaStream('remote');
+      for (final r in receivers) {
+        final track = r.track;
+        if (track != null) {
+          final exists = _remoteStream!.getTracks().any((t) => t.id == track.id);
+          if (!exists) {
+            await _remoteStream!.addTrack(track);
+          }
+        }
+      }
+      if (_remoteStream!.getTracks().isNotEmpty) {
+        _remoteRenderer.srcObject = _remoteStream;
+        setState(() => _peerJoined = true);
+      }
+    } catch (_) {}
   }
 
   @override
