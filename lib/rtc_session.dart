@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:developer' as developer;
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
@@ -34,12 +35,23 @@ class RtcSession extends ChangeNotifier {
   String? selectedAudioInputId;
   String? selectedVideoInputId;
 
+  // lightweight logger to surface messages in release builds and web console
+  void _log(String message) {
+    final msg = '[RtcSession] $message';
+    developer.log(msg, name: 'rtc');
+    // Always print; on Flutter web this shows in DevTools console
+    // ignore: avoid_print
+    print(msg);
+  }
+
   Future<void> init() async {
     await localRenderer.initialize();
     await remoteRenderer.initialize();
+    _log('Init: renderers initialized');
   }
 
   Future<void> _setupPeerConnection() async {
+    _log('PeerConnection: creating with unified-plan + STUN');
     final configuration = {
       'iceServers': [
         {'urls': ['stun:stun.l.google.com:19302']},
@@ -50,26 +62,33 @@ class RtcSession extends ChangeNotifier {
 
     _pc!.onIceConnectionState = (RTCIceConnectionState state) {
       iceState = state;
+      _log('ICE state: $state');
       notifyListeners();
       if (state == RTCIceConnectionState.RTCIceConnectionStateFailed) {
+        _log('ICE failed; attempting ICE restart and renegotiation');
         _restartIceAndRenegotiate('ice_failed');
       }
     };
 
     _pc!.onIceCandidate = (RTCIceCandidate c) {
+      _log('Local ICE candidate: mid=${c.sdpMid} mline=${c.sdpMLineIndex}');
       _sig?.send({'type': 'ice', 'candidate': c.toMap()});
     };
 
     _pc!.onTrack = (RTCTrackEvent e) {
+      final kind = e.track.kind;
+      _log('onTrack: kind=$kind id=${e.track.id} streams=${e.streams.length}');
       if (e.streams.isNotEmpty) {
         _remoteStream = e.streams.first;
         remoteRenderer.srcObject = _remoteStream;
+        _log('Remote stream attached: id=${_remoteStream!.id}');
         notifyListeners();
       }
     };
 
     // Attach existing local tracks if media already started
     if (_localStream != null) {
+      _log('Attaching existing local tracks: count=${_localStream!.getTracks().length}');
       for (final track in _localStream!.getTracks()) {
         await _pc!.addTrack(track, _localStream!);
       }
@@ -100,10 +119,12 @@ class RtcSession extends ChangeNotifier {
     };
 
     try {
+      _log('getUserMedia constraints: ${constraints.toString()}');
       final stream = await navigator.mediaDevices.getUserMedia(constraints);
       mediaError = null; // clear previous error on success
       _localStream = stream;
       localRenderer.srcObject = _localStream;
+      _log('Local media acquired: id=${stream.id} tracks=${stream.getTracks().length}');
 
       for (final track in stream.getTracks()) {
         await _pc?.addTrack(track, stream);
@@ -114,6 +135,7 @@ class RtcSession extends ChangeNotifier {
     } catch (e) {
       // Capture error for UI surfaces; common causes: permission denied, insecure context
       mediaError = e.toString();
+      _log('getUserMedia error: $mediaError');
       notifyListeners();
     }
   }
@@ -121,34 +143,44 @@ class RtcSession extends ChangeNotifier {
   Future<void> join(String roomName, {SignalingClient? client}) async {
     _roomName = roomName;
     _sig = client ?? SignalingClient.fromEnv();
+    _log('Connecting signaling at ${_sig!.uri}');
     await _sig!.connect();
     wsConnected = _sig!.isConnected;
+    _log('Signaling connected: $wsConnected');
     notifyListeners();
 
     await _setupPeerConnection();
     await _setupLocalMedia();
 
+    _log('Listening to signaling messages');
     _sig!.messages.listen(_onSignal);
+    _log('Joining room: $roomName');
     _sig!.join(roomName);
   }
 
   Future<void> _onSignal(Map<String, dynamic> msg) async {
-    switch (msg['type']) {
+    final type = msg['type'];
+    _log('Signal recv: $type ${msg.keys.toList()}');
+    switch (type) {
       case 'joined':
         peerJoined = true;
+        _log('Peer joined/acknowledged');
         notifyListeners();
         break;
       case 'offer':
         if (msg['sdp'] != null) {
+          _log('Offer received: sdpLen=${(msg['sdp'] as String).length}');
           await _pc?.setRemoteDescription(
               RTCSessionDescription(msg['sdp'], 'offer'));
           final answer = await _pc!.createAnswer();
           await _pc!.setLocalDescription(answer);
+          _log('Answer created: sdpLen=${answer.sdp?.length ?? 0}');
           _sig?.send({'type': 'answer', 'sdp': answer.sdp});
         }
         break;
       case 'answer':
         if (msg['sdp'] != null) {
+          _log('Answer received: sdpLen=${(msg['sdp'] as String).length}');
           await _pc?.setRemoteDescription(
               RTCSessionDescription(msg['sdp'], 'answer'));
         }
@@ -158,22 +190,28 @@ class RtcSession extends ChangeNotifier {
         final c = msg['candidate'];
         if (c != null) {
           try {
+            _log('Remote ICE candidate: mid=${c['sdpMid']} mline=${c['sdpMLineIndex']}');
             await _pc?.addCandidate(RTCIceCandidate(
                 c['candidate'], c['sdpMid'], c['sdpMLineIndex']));
-          } catch (_) {}
+          } catch (e) {
+            _log('addCandidate error: $e');
+          }
         }
         break;
       case 'ready':
       case 'start_negotiation':
+        _log('Negotiation trigger: $type');
         _startCall();
         break;
       case 'ws_closed':
         wsConnected = false;
+        _log('WS closed');
         notifyListeners();
         break;
       case 'ws_error':
         wsConnected = false;
         lastError = msg['error'] as String?;
+        _log('WS error: $lastError');
         notifyListeners();
         break;
     }
@@ -182,19 +220,28 @@ class RtcSession extends ChangeNotifier {
   Future<void> _startCall() async {
     if (_pc == null) return;
     try {
+      _log('Creating offer...');
       final offer = await _pc!.createOffer();
+      _log('Offer created: sdpLen=${offer.sdp?.length ?? 0}');
       await _pc!.setLocalDescription(offer);
+      _log('Local description set');
       _sig?.send({'type': 'offer', 'sdp': offer.sdp});
-    } catch (_) {}
+      _log('Offer sent');
+    } catch (e) {
+      _log('Start call error: $e');
+    }
   }
 
   Future<void> _restartIceAndRenegotiate(String reason) async {
     renegotiationAttempts++;
     try {
+      _log('ICE restart + renegotiate, reason=$reason');
       final offer = await _pc!.createOffer({'iceRestart': true});
       await _pc!.setLocalDescription(offer);
       _sig?.send({'type': 'offer', 'sdp': offer.sdp, 'reason': reason});
-    } catch (_) {}
+    } catch (e) {
+      _log('Renegotiate error: $e');
+    }
   }
 
   bool get micEnabled {
@@ -227,16 +274,21 @@ class RtcSession extends ChangeNotifier {
     try {
       await _pc?.addCandidate(RTCIceCandidate(
           candidate['candidate'], candidate['sdpMid'], candidate['sdpMLineIndex']));
-    } catch (_) {}
+    } catch (e) {
+      _log('addIceCandidate error: $e');
+    }
   }
 
   Future<void> hangup() async {
     try {
+      _log('Hangup: closing signaling and peer connection');
       await _sig?.close();
       await _pc?.close();
       await localRenderer.dispose();
       await remoteRenderer.dispose();
-    } catch (_) {}
+    } catch (e) {
+      _log('Hangup error: $e');
+    }
   }
 
   Future<void> reconnect() async {
