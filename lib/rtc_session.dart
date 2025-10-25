@@ -72,7 +72,15 @@ class RtcSession extends ChangeNotifier {
 
     _pc!.onIceCandidate = (RTCIceCandidate c) {
       _log('Local ICE candidate: mid=${c.sdpMid} mline=${c.sdpMLineIndex}');
-      _sig?.send({'type': 'ice', 'candidate': c.toMap()});
+      // Send using server's expected signal wrapper
+      _sig?.send({
+        'type': 'signal',
+        'room': _roomName,
+        'payload': {
+          'type': 'candidate',
+          'candidate': c.toMap(),
+        }
+      });
     };
 
     _pc!.onTrack = (RTCTrackEvent e) {
@@ -161,11 +169,52 @@ class RtcSession extends ChangeNotifier {
   Future<void> _onSignal(Map<String, dynamic> msg) async {
     final type = msg['type'];
     _log('Signal recv: $type ${msg.keys.toList()}');
+
+    // Handle wrapped signal payloads from server
+    if (type == 'signal') {
+      final payload = msg['payload'];
+      final ptype = payload is Map<String, dynamic> ? payload['type'] : null;
+      _log('Signal payload: $ptype');
+      if (ptype == 'offer' && payload['sdp'] != null) {
+        _log('Offer(received via wrapper): sdpLen=${(payload['sdp'] as String).length}');
+        await _pc?.setRemoteDescription(
+            RTCSessionDescription(payload['sdp'], 'offer'));
+        final answer = await _pc!.createAnswer();
+        await _pc!.setLocalDescription(answer);
+        _log('Answer(created): sdpLen=${answer.sdp?.length ?? 0}');
+        _sig?.send({
+          'type': 'signal',
+          'room': _roomName,
+          'payload': {'type': 'answer', 'sdp': answer.sdp},
+        });
+        return;
+      } else if (ptype == 'answer' && payload['sdp'] != null) {
+        _log('Answer(received via wrapper): sdpLen=${(payload['sdp'] as String).length}');
+        await _pc?.setRemoteDescription(
+            RTCSessionDescription(payload['sdp'], 'answer'));
+        return;
+      } else if ((ptype == 'candidate' || ptype == 'ice') && payload['candidate'] != null) {
+        final c = payload['candidate'];
+        try {
+          _log('Remote ICE candidate(via wrapper): mid=${c['sdpMid']} mline=${c['sdpMLineIndex']}');
+          await _pc?.addCandidate(
+              RTCIceCandidate(c['candidate'], c['sdpMid'], c['sdpMLineIndex']));
+        } catch (e) {
+          _log('addCandidate error: $e');
+        }
+        return;
+      }
+    }
+
+    // Backward compatibility for unwrapped messages
     switch (type) {
       case 'joined':
         peerJoined = true;
         _log('Peer joined/acknowledged');
         notifyListeners();
+        break;
+      case 'peer_joined':
+        _log('Peer joined event');
         break;
       case 'offer':
         if (msg['sdp'] != null) {
@@ -175,7 +224,11 @@ class RtcSession extends ChangeNotifier {
           final answer = await _pc!.createAnswer();
           await _pc!.setLocalDescription(answer);
           _log('Answer created: sdpLen=${answer.sdp?.length ?? 0}');
-          _sig?.send({'type': 'answer', 'sdp': answer.sdp});
+          _sig?.send({
+            'type': 'signal',
+            'room': _roomName,
+            'payload': {'type': 'answer', 'sdp': answer.sdp},
+          });
         }
         break;
       case 'answer':
@@ -225,7 +278,12 @@ class RtcSession extends ChangeNotifier {
       _log('Offer created: sdpLen=${offer.sdp?.length ?? 0}');
       await _pc!.setLocalDescription(offer);
       _log('Local description set');
-      _sig?.send({'type': 'offer', 'sdp': offer.sdp});
+      // Send using server's expected signal wrapper
+      _sig?.send({
+        'type': 'signal',
+        'room': _roomName,
+        'payload': {'type': 'offer', 'sdp': offer.sdp},
+      });
       _log('Offer sent');
     } catch (e) {
       _log('Start call error: $e');
@@ -238,7 +296,11 @@ class RtcSession extends ChangeNotifier {
       _log('ICE restart + renegotiate, reason=$reason');
       final offer = await _pc!.createOffer({'iceRestart': true});
       await _pc!.setLocalDescription(offer);
-      _sig?.send({'type': 'offer', 'sdp': offer.sdp, 'reason': reason});
+      _sig?.send({
+        'type': 'signal',
+        'room': _roomName,
+        'payload': {'type': 'offer', 'sdp': offer.sdp, 'reason': reason},
+      });
     } catch (e) {
       _log('Renegotiate error: $e');
     }
