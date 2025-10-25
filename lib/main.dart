@@ -245,6 +245,7 @@ class _RoomPageState extends State<RoomPage> {
   }
 
   Future<void> _setupMedia() async {
+    _debug('🎬 SETTING UP LOCAL MEDIA...');
     try {
       final isMobile = defaultTargetPlatform == TargetPlatform.iOS || defaultTargetPlatform == TargetPlatform.android;
       final audioConstraints = isMobile ? true : (_selectedMicId != null ? {'deviceId': _selectedMicId} : true);
@@ -253,11 +254,21 @@ class _RoomPageState extends State<RoomPage> {
         'audio': audioConstraints,
         'video': videoConstraints,
       };
+      _debug('🎬 Media constraints: ${jsonEncode(constraints)}');
+      _debug('🎬 Platform: ${isMobile ? 'Mobile' : 'Desktop'}, Selected mic: $_selectedMicId, Selected cam: $_selectedCamId');
+      
       final stream = await navigator.mediaDevices.getUserMedia(constraints);
       _localStream = stream;
       _localRenderer.srcObject = _localStream;
+      
+      _debug('✅ LOCAL MEDIA SETUP SUCCESS - Stream ID: ${stream.id}');
+      _debug('🎬 Local stream tracks: ${stream.getTracks().length}');
+      for (final track in stream.getTracks()) {
+        _debug('🎬 Local ${track.kind} track - ID: ${track.id}, enabled: ${track.enabled}');
+      }
     } catch (e) {
-      // Common causes: permissions denied or insecure context (no HTTPS)
+      _debug('❌ LOCAL MEDIA SETUP FAILED: $e');
+      _debug('❌ Common causes: permissions denied or insecure context (no HTTPS)');
     }
   }
 
@@ -291,8 +302,13 @@ class _RoomPageState extends State<RoomPage> {
     } catch (_) {}
 
     _pc!.onIceConnectionState = (RTCIceConnectionState state) {
-      _debug('ICE state: $state');
-      if (state == RTCIceConnectionState.RTCIceConnectionStateConnected) {
+      _debug('🧊 ICE CONNECTION STATE CHANGED: $state');
+      if (state == RTCIceConnectionState.RTCIceConnectionStateNew) {
+        _debug('🧊 ICE: New - Starting ICE gathering');
+      } else if (state == RTCIceConnectionState.RTCIceConnectionStateChecking) {
+        _debug('🧊 ICE: Checking - Testing connectivity');
+      } else if (state == RTCIceConnectionState.RTCIceConnectionStateConnected) {
+        _debug('✅ ICE: CONNECTED - Peer connection established!');
         _iceRestartAttempts = 0;
         _qualityLowCount = 0;
         _ensureRemoteReceiving();
@@ -300,53 +316,86 @@ class _RoomPageState extends State<RoomPage> {
           _statsScheduled = true;
           _scheduleInboundStatsCheck();
         }
+      } else if (state == RTCIceConnectionState.RTCIceConnectionStateCompleted) {
+        _debug('✅ ICE: COMPLETED - All candidates processed');
       } else if (state == RTCIceConnectionState.RTCIceConnectionStateFailed) {
+        _debug('❌ ICE: FAILED - Connection failed, attempting restart');
         _restartIceAndRenegotiate('ice_failed');
       } else if (state == RTCIceConnectionState.RTCIceConnectionStateDisconnected) {
+        _debug('⚠️ ICE: DISCONNECTED - Connection lost');
         _statsScheduled = false;
         Future.delayed(const Duration(seconds: 2), () {
-          // If still disconnected after delay, try restart with backoff
           if (_pc != null && _pc!.iceConnectionState == RTCIceConnectionState.RTCIceConnectionStateDisconnected) {
+            _debug('🔄 ICE still disconnected after 2s, attempting restart');
             _restartIceAndRenegotiate('ice_disconnected');
           }
         });
+      } else if (state == RTCIceConnectionState.RTCIceConnectionStateClosed) {
+        _debug('🔒 ICE: CLOSED - Connection closed');
+      } else {
+        _debug('🧊 ICE: Unknown state - $state');
       }
     };
 
     // Remove duplicate scheduling in onConnectionState
     _pc!.onConnectionState = (RTCPeerConnectionState state) {
-      _debug('PC state: $state');
-      if (state == RTCPeerConnectionState.RTCPeerConnectionStateDisconnected) {
+      _debug('🔗 PEER CONNECTION STATE CHANGED: $state');
+      if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
+        _debug('✅ PC: CONNECTED - Peer connection fully established');
+      } else if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnecting) {
+        _debug('🔄 PC: CONNECTING - Establishing connection');
+      } else if (state == RTCPeerConnectionState.RTCPeerConnectionStateDisconnected) {
+        _debug('⚠️ PC: DISCONNECTED - Connection lost');
         _statsScheduled = false;
+      } else if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
+        _debug('❌ PC: FAILED - Connection failed');
+      } else if (state == RTCPeerConnectionState.RTCPeerConnectionStateClosed) {
+        _debug('🔒 PC: CLOSED - Connection closed');
+      } else {
+        _debug('🔗 PC: Unknown state - $state');
       }
     };
 
     // Remote track handler: normalize to a single _remoteStream container
     _pc!.onTrack = (RTCTrackEvent event) async {
-      _debug('onTrack kind=${event.track.kind} streams=${event.streams.length}');
+      final track = event.track;
+      _debug('🎥 ON TRACK RECEIVED - kind: ${track.kind}, id: ${track.id}, streams: ${event.streams.length}');
+      _debug('🎥 Track enabled: ${track.enabled}');
+      
       _remoteStream ??= await createLocalMediaStream('remote');
       final remoteStream = _remoteStream!;
-      final track = event.track;
       final exists = remoteStream.getTracks().any((t) => t.id == track.id);
+      
       if (!exists) {
         await remoteStream.addTrack(track);
+        _debug('✅ Added ${track.kind} track to remote stream - Track ID: ${track.id}');
+      } else {
+        _debug('⚠️ Track already exists in remote stream - Track ID: ${track.id}');
       }
+      
       // If peer provided a stream, import its tracks into our container
       if (event.streams.isNotEmpty) {
+        _debug('📥 Processing ${event.streams.length} streams from peer');
         for (final s in event.streams) {
+          _debug('📥 Stream ID: ${s.id}, tracks: ${s.getTracks().length}');
           for (final t in s.getTracks()) {
             final exists2 = remoteStream.getTracks().any((rt) => rt.id == t.id);
             if (!exists2) {
               await remoteStream.addTrack(t);
+              _debug('✅ Added ${t.kind} track from stream - Track ID: ${t.id}');
             }
           }
         }
       }
+      
       _remoteRenderer.srcObject = remoteStream;
+      _debug('🎥 Remote renderer updated - Total tracks: ${remoteStream.getTracks().length}');
+      
       setState(() {
         _peerJoined = true;
         if (track.kind == 'video') {
           _remoteVideoEnabled = true;
+          _debug('✅ Remote video enabled - Video track received');
         }
       });
     };
@@ -379,6 +428,7 @@ class _RoomPageState extends State<RoomPage> {
 
     // ICE candidate handler: send to signaling server
     _pc!.onIceCandidate = (RTCIceCandidate candidate) {
+      _debug('🧊 ICE CANDIDATE GENERATED - candidate: ${candidate.candidate?.substring(0, 50) ?? 'null'}..., sdpMid: ${candidate.sdpMid}, sdpMLineIndex: ${candidate.sdpMLineIndex}');
       if (_channel != null && (candidate.candidate?.isNotEmpty ?? false)) {
         final payload = {
           'type': 'signal',
@@ -390,24 +440,28 @@ class _RoomPageState extends State<RoomPage> {
             'sdpMLineIndex': candidate.sdpMLineIndex,
           }
         };
-        _debug('send ICE');
+        _debug('📤 SENDING ICE CANDIDATE to signaling server');
         _send(payload);
+      } else {
+        _debug('❌ ICE CANDIDATE: Cannot send - channel null or empty candidate');
       }
     };
 
     // Connect to signaling server via WebSocket
     try {
       final url = _endpointForRoom(widget.roomName);
-      _debug('Connecting WS: $url');
+      _debug('🌐 CONNECTING TO WEBSOCKET: $url');
       _channel = WebSocketChannel.connect(Uri.parse(url));
+      _debug('✅ WebSocket connection initiated');
     } catch (e) {
-      _debug('WS connect error: $e');
+      _debug('❌ WS CONNECT ERROR: $e');
+      _debug('❌ Keeping local preview only - no peer connection possible');
       // If connection fails, keep local preview
       return;
     }
 
     // Join the room
-    _debug('Join room: ${widget.roomName}');
+    _debug('🚪 JOINING ROOM: ${widget.roomName}');
     _send({'type': 'join', 'room': widget.roomName});
 
     // Handle messages
@@ -422,12 +476,12 @@ class _RoomPageState extends State<RoomPage> {
       }
 
       final type = (msg['type'] ?? '').toString();
-      _debug('recv: $type');
+      _debug('recv: $type - Full message: ${jsonEncode(msg)}');
 
       switch (type) {
         case 'joined':
           _role = (msg['role'] ?? '').toString();
-          _debug('joined as ${_role ?? ''}');
+          _debug('✅ JOINED room as role: ${_role ?? 'unknown'} - Room: ${widget.roomName}');
           break;
 
         case 'signal':
@@ -447,12 +501,14 @@ class _RoomPageState extends State<RoomPage> {
                 case 'offer':
                   {
                     final sdp = payload['sdp'] as String?;
+                    _debug('📥 RECEIVED OFFER - SDP length: ${sdp?.length ?? 0}');
                     if (sdp == null || _pc == null) break;
-                    _debug('setRemoteDescription(offer)');
+                    _debug('🔄 Setting remote description (offer)...');
                     try {
                       await _pc!.setRemoteDescription(RTCSessionDescription(sdp, 'offer'));
+                      _debug('✅ Remote description set');
                     } catch (e) {
-                      _debug('SRD(offer) error: $e');
+                      _debug('❌ SRD(offer) error: $e');
                       _restartIceAndRenegotiate('srd_offer_error');
                       break;
                     }
@@ -471,9 +527,11 @@ class _RoomPageState extends State<RoomPage> {
                     await _attachRemoteReceivers();
 
                     try {
+                      _debug('✅ Creating answer...');
                       final answer = await _pc!.createAnswer();
+                      _debug('✅ Answer created, setting local description...');
                       await _pc!.setLocalDescription(answer);
-                      _debug('send answer');
+                      _debug('📤 SENDING ANSWER - SDP length: ${answer.sdp?.length ?? 0}');
                       _send({
                         'type': 'signal',
                         'room': widget.roomName,
@@ -485,24 +543,29 @@ class _RoomPageState extends State<RoomPage> {
                       _renegotiating = false;
                       _lastRenegotiateAt = DateTime.now();
                     } catch (e) {
-                      _debug('create/set answer error: $e');
+                      _debug('❌ create/set answer error: $e');
                     }
                   }
                   break;
                 case 'answer':
                   {
                     final sdp = payload['sdp'] as String?;
-                    if (sdp == null || _pc == null) break;
+                    _debug('📥 RECEIVED ANSWER - SDP length: ${sdp?.length ?? 0}');
+                    if (sdp == null || _pc == null) {
+                      _debug('❌ ANSWER: Missing SDP or PC is null');
+                      break;
+                    }
                     final current = await _pc!.getRemoteDescription();
                     if (current != null && current.type == 'answer') {
                       _debug('skip duplicate answer');
                       break;
                     }
-                    _debug('setRemoteDescription(answer)');
+                    _debug('🔄 Setting remote description (answer)...');
                     try {
                       await _pc!.setRemoteDescription(RTCSessionDescription(sdp, 'answer'));
+                      _debug('✅ Remote description (answer) set successfully');
                     } catch (e) {
-                      _debug('SRD(answer) error: $e');
+                      _debug('❌ SRD(answer) error: $e');
                       _restartIceAndRenegotiate('srd_answer_error');
                       break;
                     }
@@ -531,6 +594,10 @@ class _RoomPageState extends State<RoomPage> {
                       'sdpMid': payload['sdpMid'],
                       'sdpMLineIndex': payload['sdpMLineIndex'],
                     };
+                    final c = cand['candidate'] as String?;
+                    final sdpMid = cand['sdpMid'] as String?;
+                    final sdpMLineIndex = cand['sdpMLineIndex'] as int?;
+                    _debug('📥 RECEIVED ICE CANDIDATE - candidate: ${c?.substring(0, 50) ?? 'null'}..., sdpMid: $sdpMid, sdpMLineIndex: $sdpMLineIndex');
                     if (_pc == null) break;
                     final remoteDesc = await _pc!.getRemoteDescription();
                     if (remoteDesc == null) {
@@ -538,11 +605,16 @@ class _RoomPageState extends State<RoomPage> {
                       _pendingIce.add(cand);
                     } else {
                       _debug('add ICE');
-                      await _pc!.addCandidate(RTCIceCandidate(
-                        cand['candidate'] as String?,
-                        cand['sdpMid'] as String?,
-                        cand['sdpMLineIndex'] as int?,
-                      ));
+                      try {
+                        await _pc!.addCandidate(RTCIceCandidate(
+                          cand['candidate'] as String?,
+                          cand['sdpMid'] as String?,
+                          cand['sdpMLineIndex'] as int?,
+                        ));
+                        _debug('✅ ICE candidate added successfully');
+                      } catch (e) {
+                        _debug('❌ addCandidate error: $e');
+                      }
                     }
                   }
                   break;
@@ -553,6 +625,7 @@ class _RoomPageState extends State<RoomPage> {
 
         case 'peer-joined':
         case 'peer_joined':
+          _debug('👥 PEER JOINED - Setting _peerJoined = true');
           setState(() => _peerJoined = true);
           break;
         case 'ready':
@@ -564,6 +637,7 @@ class _RoomPageState extends State<RoomPage> {
 
         case 'peer-left':
         case 'peer_left':
+          _debug('👋 PEER LEFT - Clearing remote stream and setting _peerJoined = false');
           setState(() {
             _peerJoined = false;
             _remoteRenderer.srcObject = null;
@@ -708,26 +782,44 @@ class _RoomPageState extends State<RoomPage> {
   }
 
   Future<void> _startCall() async {
-    if (_pc == null) return;
-    // Create and send offer
-    final offer = await _pc!.createOffer();
-    await _pc!.setLocalDescription(offer);
-    _debug('send offer');
-    _send({
-      'type': 'signal',
-      'room': widget.roomName,
-      'payload': {
-        'type': 'offer',
-        'sdp': offer.sdp,
-      }
-    });
+    _debug('📞 STARTING CALL - Creating offer...');
+    if (_pc == null) {
+      _debug('❌ Cannot start call - PeerConnection is null');
+      return;
+    }
+    
+    try {
+      // Create and send offer
+      _debug('🔄 Creating WebRTC offer...');
+      final offer = await _pc!.createOffer();
+      _debug('✅ Offer created - SDP length: ${offer.sdp?.length ?? 0}');
+      
+      _debug('🔄 Setting local description...');
+      await _pc!.setLocalDescription(offer);
+      _debug('✅ Local description set');
+      
+      _debug('📤 SENDING OFFER to peer via signaling');
+      _send({
+        'type': 'signal',
+        'room': widget.roomName,
+        'payload': {
+          'type': 'offer',
+          'sdp': offer.sdp,
+        }
+      });
+    } catch (e) {
+      _debug('❌ START CALL FAILED: $e');
+    }
   }
 
   void _send(Map<String, dynamic> msg) {
     try {
+      final msgType = msg['type'] ?? 'unknown';
+      final payloadType = msg['payload']?['type'] ?? '';
+      _debug('📤 SENDING MESSAGE: $msgType${payloadType.isNotEmpty ? '/$payloadType' : ''} - ${jsonEncode(msg)}');
       _channel?.sink.add(jsonEncode(msg));
     } catch (e) {
-      _debug('WS send error: $e');
+      _debug('❌ WS SEND ERROR: $e');
     }
   }
 
