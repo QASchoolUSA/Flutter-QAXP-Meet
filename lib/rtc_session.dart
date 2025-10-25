@@ -334,7 +334,12 @@ class RtcSession extends ChangeNotifier {
         }
       }
       if (remote.getTracks().isNotEmpty) {
-        remoteRenderer.srcObject = remote;
+        // Prefer the dedicated video-only stream for renderer to avoid web rendering quirks
+        if (_remoteVideoStream != null) {
+          remoteRenderer.srcObject = _remoteVideoStream;
+        } else {
+          remoteRenderer.srcObject = remote;
+        }
         notifyListeners();
       }
     } catch (e) {
@@ -587,7 +592,7 @@ class RtcSession extends ChangeNotifier {
       // Collect available H264 payloads in m=video
       final h264Present = payloads.where((pt) => rtpmap[pt] == 'H264').toList();
       if (h264Present.isEmpty) {
-        // No H264 in SDP; keep as-is
+        _log('SDP munged: no H264 present; leaving as-is');
         return sdp;
       }
 
