@@ -539,10 +539,10 @@ class RtcSession extends ChangeNotifier {
       final mVideoIndex = lines.indexWhere((l) => l.startsWith('m=video'));
       if (mVideoIndex == -1) return sdp;
 
-      // Map payload type -> codec name
+      // Map payload type -> codec name and params
       final rtpmap = <int, String>{};
-      // Map payload type -> fmtp line
       final fmtp = <int, String>{};
+      final rtcpfb = <int, List<String>>{};
       for (final l in lines) {
         final m1 = RegExp(r'^a=rtpmap:(\\d+)\\s+([A-Za-z0-9\-]+)/').firstMatch(l);
         if (m1 != null) {
@@ -555,27 +555,25 @@ class RtcSession extends ChangeNotifier {
         if (m2 != null) {
           final pt = int.parse(m2.group(1)!);
           fmtp[pt] = m2.group(2) ?? '';
+          continue;
+        }
+        final m3 = RegExp(r'^a=rtcp-fb:(\\d+)\\s+(.+)$').firstMatch(l);
+        if (m3 != null) {
+          final pt = int.parse(m3.group(1)!);
+          (rtcpfb[pt] ??= []).add(m3.group(2) ?? '');
+          continue;
         }
       }
 
-      List<int> h264Pts = rtpmap.entries
-          .where((e) => e.value == 'H264')
-          .map((e) => e.key)
-          .toList();
-      if (h264Pts.isEmpty) return sdp;
-
       int scorePt(int pt) {
         final params = (fmtp[pt] ?? '').toLowerCase();
-        // Prefer packetization-mode=1
         final pkt = params.contains('packetization-mode=1') ? 2 : 0;
-        // Prefer baseline profiles (42e0xx). Some browsers struggle with high/main.
         final profMatch = RegExp(r'profile-level-id=([0-9a-fA-F]+)').firstMatch(params);
         final prof = profMatch?.group(1)?.toLowerCase() ?? '';
         final baseline = prof.startsWith('42e0') ? 3 : 0;
-        return baseline + pkt; // baseline weighted more than packetization
+        return baseline + pkt;
       }
 
-      // Parse m=video payloads preserving original non-H264 order
       final parts = lines[mVideoIndex].split(' ');
       final header = parts.take(3).toList();
       final payloads = parts
@@ -584,17 +582,40 @@ class RtcSession extends ChangeNotifier {
           .whereType<int>()
           .toList();
 
-      // Sort H264 by score descending, keep only ones present in m=video list
-      final h264Present = h264Pts.where((pt) => payloads.contains(pt)).toList();
-      h264Present.sort((a, b) => scorePt(b).compareTo(scorePt(a)));
+      // Collect available H264 payloads in m=video
+      final h264Present = payloads.where((pt) => rtpmap[pt] == 'H264').toList();
+      if (h264Present.isEmpty) {
+        // No H264 in SDP; keep as-is
+        return sdp;
+      }
 
-      final reordered = [
-        ...h264Present,
-        ...payloads.where((pt) => !h264Present.contains(pt)),
-      ];
-      lines[mVideoIndex] = '${header.join(' ')} ${reordered.join(' ')}';
-      _log('SDP munged: m=video payloads=${reordered.join(',')} H264 first (baseline preferred)');
-      return lines.join('\n');
+      // Choose best H264 payload (baseline + pkt-mode=1 preferred)
+      h264Present.sort((a, b) => scorePt(b).compareTo(scorePt(a)));
+      final bestH264 = h264Present.first;
+
+      // Strict: advertise only best H264 payload to force compatible codec
+      final newPayloads = [bestH264];
+      lines[mVideoIndex] = '${header.join(' ')} ${newPayloads.join(' ')}';
+
+      // Remove non-selected payload definitions (rtpmap/fmtp/rtcp-fb)
+      final allowed = newPayloads.toSet();
+      final filtered = <String>[];
+      for (final l in lines) {
+        // Keep all non-codec lines and codec lines for allowed payload
+        final rmRtpmap = RegExp(r'^a=rtpmap:(\\d+)').firstMatch(l);
+        final rmFmtp = RegExp(r'^a=fmtp:(\\d+)').firstMatch(l);
+        final rmFb = RegExp(r'^a=rtcp-fb:(\\d+)').firstMatch(l);
+        if (rmRtpmap != null || rmFmtp != null || rmFb != null) {
+          final pt = int.parse((rmRtpmap ?? rmFmtp ?? rmFb)!.group(1)!);
+          if (!allowed.contains(pt)) {
+            continue; // drop lines for non-selected payloads
+          }
+        }
+        filtered.add(l);
+      }
+
+      _log('SDP munged: forced H264 payload=${bestH264} (baseline preferred)');
+      return filtered.join('\n');
     } catch (_) {
       return sdp;
     }
