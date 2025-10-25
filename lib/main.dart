@@ -213,12 +213,21 @@ class _RoomPageState extends State<RoomPage> {
   DateTime? _prevStatsAt;
 
   void _debug(String message) {
-    debugPrint('[meet] $message');
+    final logMessage = '[QAXP-Meet] $message';
+    // Use multiple logging methods to ensure visibility
+    debugPrint(logMessage);
+    print(logMessage);
+    // For web builds, also log to browser console
+    if (kIsWeb) {
+      // ignore: avoid_print
+      print('🌐 $logMessage');
+    }
   }
 
   @override
   void initState() {
     super.initState();
+    _debug('🚀 QAXP-Meet App Starting - Logging System Active!');
     _init();
   }
 
