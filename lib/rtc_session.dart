@@ -556,7 +556,13 @@ class RtcSession extends ChangeNotifier {
       final rtpmap = <int, String>{};
       final fmtp = <int, String>{};
       final rtcpfb = <int, List<String>>{};
-      for (final l in lines) {
+      
+      // Parse video section attributes (from m=video line onwards until next m= line)
+      final nextMIndex = lines.indexWhere((l) => l.startsWith('m=') && !l.startsWith('m=video'), mVideoIndex + 1);
+      final videoSectionEnd = nextMIndex == -1 ? lines.length : nextMIndex;
+      
+      for (int i = mVideoIndex; i < videoSectionEnd; i++) {
+        final l = lines[i];
         final m1 = RegExp(r'^a=rtpmap:(\d+)\s+([A-Za-z0-9\-]+)/').firstMatch(l);
         if (m1 != null) {
           final pt = int.parse(m1.group(1)!);
