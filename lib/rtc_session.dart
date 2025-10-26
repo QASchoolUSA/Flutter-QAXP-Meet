@@ -110,7 +110,7 @@ class RtcSession extends ChangeNotifier {
       if (e.streams.isEmpty) {
         _remoteStream ??= await createLocalMediaStream('remote');
         _remoteStream!.addTrack(e.track);
-        _log('Remote ${kind} track attached via synthetic stream: id=${_remoteStream!.id}');
+        _log('Remote $kind track attached via synthetic stream: id=${_remoteStream!.id}');
       } else {
         _remoteStream = e.streams.first;
         _log('Remote stream attached: id=${_remoteStream!.id}');
@@ -217,7 +217,9 @@ class RtcSession extends ChangeNotifier {
             RTCSessionDescription(payload['sdp'], 'offer'));
         final answer = await _pc!.createAnswer();
         var sdpA = answer.sdp ?? '';
-        sdpA = _preferH264(sdpA);
+        if (defaultTargetPlatform == TargetPlatform.iOS) {
+          sdpA = _preferH264(sdpA);
+        }
         await _pc!.setLocalDescription(RTCSessionDescription(sdpA, 'answer'));
         _log('Answer(created): sdpLen=${sdpA.length}');
         _sig?.send({
@@ -263,7 +265,9 @@ class RtcSession extends ChangeNotifier {
               RTCSessionDescription(msg['sdp'], 'offer'));
           final answer = await _pc!.createAnswer();
           var sdpA = answer.sdp ?? '';
-          sdpA = _preferH264(sdpA);
+          if (defaultTargetPlatform == TargetPlatform.iOS) {
+            sdpA = _preferH264(sdpA);
+          }
           await _pc!.setLocalDescription(RTCSessionDescription(sdpA, 'answer'));
           _log('Answer created: sdpLen=${sdpA.length}');
           _sig?.send({
@@ -382,7 +386,9 @@ class RtcSession extends ChangeNotifier {
       _log('Creating offer...');
       final offer = await _pc!.createOffer();
       var sdp = offer.sdp ?? '';
-      sdp = _preferH264(sdp);
+      if (defaultTargetPlatform == TargetPlatform.iOS) {
+        sdp = _preferH264(sdp);
+      }
       final mungedOffer = RTCSessionDescription(sdp, 'offer');
       _log('Offer created: sdpLen=${sdp.length}');
       await _pc!.setLocalDescription(mungedOffer);
@@ -405,7 +411,9 @@ class RtcSession extends ChangeNotifier {
       _log('ICE restart + renegotiate, reason=$reason');
       final offer = await _pc!.createOffer({'iceRestart': true});
       var sdp = offer.sdp ?? '';
-      sdp = _preferH264(sdp);
+      if (defaultTargetPlatform == TargetPlatform.iOS) {
+        sdp = _preferH264(sdp);
+      }
       await _pc!.setLocalDescription(RTCSessionDescription(sdp, 'offer'));
       _sig?.send({
         'type': 'signal',
@@ -552,47 +560,18 @@ class RtcSession extends ChangeNotifier {
       final mVideoIndex = lines.indexWhere((l) => l.startsWith('m=video'));
       if (mVideoIndex == -1) return sdp;
 
-      // Map payload type -> codec name and params
+      // Build rtpmap: pt -> codec name
       final rtpmap = <int, String>{};
-      final fmtp = <int, String>{};
-      final rtcpfb = <int, List<String>>{};
-      
-      // Parse video section attributes (from m=video line onwards until next m= line)
-      final nextMIndex = lines.indexWhere((l) => l.startsWith('m=') && !l.startsWith('m=video'), mVideoIndex + 1);
-      final videoSectionEnd = nextMIndex == -1 ? lines.length : nextMIndex;
-      
-      for (int i = mVideoIndex; i < videoSectionEnd; i++) {
-        final l = lines[i];
-        final m1 = RegExp(r'^a=rtpmap:(\d+)\s+([A-Za-z0-9\-]+)/').firstMatch(l);
-        if (m1 != null) {
-          final pt = int.parse(m1.group(1)!);
-          final codec = (m1.group(2) ?? '').toUpperCase();
+      for (final l in lines) {
+        final m = RegExp(r'^a=rtpmap:(\\d+)\\s+([A-Za-z0-9\-]+)/').firstMatch(l);
+        if (m != null) {
+          final pt = int.parse(m.group(1)!);
+          final codec = (m.group(2) ?? '').toUpperCase();
           rtpmap[pt] = codec;
-          continue;
-        }
-        final m2 = RegExp(r'^a=fmtp:(\d+)\s+(.+)$').firstMatch(l);
-        if (m2 != null) {
-          final pt = int.parse(m2.group(1)!);
-          fmtp[pt] = m2.group(2) ?? '';
-          continue;
-        }
-        final m3 = RegExp(r'^a=rtcp-fb:(\d+)\s+(.+)$').firstMatch(l);
-        if (m3 != null) {
-          final pt = int.parse(m3.group(1)!);
-          (rtcpfb[pt] ??= []).add(m3.group(2) ?? '');
-          continue;
         }
       }
 
-      int scorePt(int pt) {
-        final params = (fmtp[pt] ?? '').toLowerCase();
-        final pkt = params.contains('packetization-mode=1') ? 2 : 0;
-        final profMatch = RegExp(r'profile-level-id=([0-9a-fA-F]+)').firstMatch(params);
-        final prof = profMatch?.group(1)?.toLowerCase() ?? '';
-        final baseline = prof.startsWith('42e0') ? 3 : 0;
-        return baseline + pkt;
-      }
-
+      // Parse payloads from m=video
       final parts = lines[mVideoIndex].split(' ');
       final header = parts.take(3).toList();
       final payloads = parts
@@ -601,40 +580,20 @@ class RtcSession extends ChangeNotifier {
           .whereType<int>()
           .toList();
 
-      // Collect available H264 payloads in m=video
-      final h264Present = payloads.where((pt) => rtpmap[pt] == 'H264').toList();
-      if (h264Present.isEmpty) {
-        _log('SDP munged: no H264 present; leaving as-is');
+      // If H264 present, move preferred H264 payload to front, but keep others
+      final h264Pts = payloads.where((pt) => rtpmap[pt] == 'H264').toList();
+      if (h264Pts.isEmpty) {
+        _log('SDP: no H264 present; leaving codec order');
         return sdp;
       }
 
-      // Choose best H264 payload (baseline + pkt-mode=1 preferred)
-      h264Present.sort((a, b) => scorePt(b).compareTo(scorePt(a)));
-      final bestH264 = h264Present.first;
+      // Pick the first H264 payload (simple heuristic)
+      final bestH264 = h264Pts.first;
+      final reordered = [bestH264, ...payloads.where((pt) => pt != bestH264)];
+      lines[mVideoIndex] = '${header.join(' ')} ${reordered.join(' ')}';
 
-      // Strict: advertise only best H264 payload to force compatible codec
-      final newPayloads = [bestH264];
-      lines[mVideoIndex] = '${header.join(' ')} ${newPayloads.join(' ')}';
-
-      // Remove non-selected payload definitions (rtpmap/fmtp/rtcp-fb)
-      final allowed = newPayloads.toSet();
-      final filtered = <String>[];
-      for (final l in lines) {
-        // Keep all non-codec lines and codec lines for allowed payload
-        final rmRtpmap = RegExp(r'^a=rtpmap:(\d+)').firstMatch(l);
-        final rmFmtp = RegExp(r'^a=fmtp:(\d+)').firstMatch(l);
-        final rmFb = RegExp(r'^a=rtcp-fb:(\d+)').firstMatch(l);
-        if (rmRtpmap != null || rmFmtp != null || rmFb != null) {
-          final pt = int.parse((rmRtpmap ?? rmFmtp ?? rmFb)!.group(1)!);
-          if (!allowed.contains(pt)) {
-            continue; // drop lines for non-selected payloads
-          }
-        }
-        filtered.add(l);
-      }
-
-      _log('SDP munged: forced H264 payload=${bestH264} (baseline preferred)');
-      return filtered.join('\n');
+      _log('SDP: prefer H264 by reordering payloads, kept others intact');
+      return lines.join('\n');
     } catch (_) {
       return sdp;
     }
