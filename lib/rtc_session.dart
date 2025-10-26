@@ -113,6 +113,12 @@ class RtcSession extends ChangeNotifier {
 
       remoteRenderer.srcObject = target;
       notifyListeners();
+      // On some web engines, forcing a reattach helps the element start rendering
+      if (kIsWeb && kind == 'video') {
+        await Future.delayed(const Duration(milliseconds: 0));
+        remoteRenderer.srcObject = target;
+        notifyListeners();
+      }
     };
 
     // Fallback for older/Plan-B style backends
@@ -210,7 +216,7 @@ class RtcSession extends ChangeNotifier {
             RTCSessionDescription(payload['sdp'], 'offer'));
         final answer = await _pc!.createAnswer();
         var sdpA = answer.sdp ?? '';
-        if (defaultTargetPlatform == TargetPlatform.iOS) {
+        if (kIsWeb) {
           sdpA = _preferH264(sdpA);
         }
         await _pc!.setLocalDescription(RTCSessionDescription(sdpA, 'answer'));
