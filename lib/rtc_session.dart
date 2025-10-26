@@ -363,7 +363,7 @@ class RtcSession extends ChangeNotifier {
         try {
           final localDesc = await _pc?.getLocalDescription();
           final remoteDesc = await _pc?.getRemoteDescription();
-          if (remoteDesc == null && (localDesc == null || localDesc.type != 'offer')) {
+          if (remoteDesc == null) {
             _log('Negotiation trigger: $type - creating offer');
             _startCall();
             // Fallback: if remote desc still not set after short delay, ensure we offered
