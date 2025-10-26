@@ -100,8 +100,19 @@ class RtcSession extends ChangeNotifier {
       MediaStream? target;
       if (e.streams.isNotEmpty) {
         target = e.streams.first;
-        _remoteStream = target;
-        _log('Remote stream attached (from peer): id=${target.id}');
+        // Guard: do not attach our own local stream as remote
+        if (_localStream != null && target.id == _localStream!.id) {
+          _log('onTrack guard: peer-provided stream matches local; using synthetic remote container');
+          _remoteStream ??= await createLocalMediaStream('remote');
+          final exists = _remoteStream!.getTracks().any((t) => t.id == e.track.id);
+          if (!exists) {
+            await _remoteStream!.addTrack(e.track);
+          }
+          target = _remoteStream;
+        } else {
+          _remoteStream = target;
+          _log('Remote stream attached (from peer): id=${target.id}');
+        }
       } else {
         _remoteStream ??= await createLocalMediaStream('remote');
         final exists = _remoteStream!.getTracks().any((t) => t.id == e.track.id);
@@ -123,7 +134,21 @@ class RtcSession extends ChangeNotifier {
     };
 
     // Fallback for older/Plan-B style backends
-    _pc!.onAddStream = (MediaStream stream) {
+    _pc!.onAddStream = (MediaStream stream) async {
+      // Guard: do not attach our own local stream as remote
+      if (_localStream != null && stream.id == _localStream!.id) {
+        _log('onAddStream guard: incoming stream matches local; importing tracks only');
+        _remoteStream ??= await createLocalMediaStream('remote');
+        for (final t in stream.getTracks()) {
+          final exists = _remoteStream!.getTracks().any((rt) => rt.id == t.id);
+          if (!exists) {
+            await _remoteStream!.addTrack(t);
+          }
+        }
+        remoteRenderer.srcObject = _remoteStream;
+        notifyListeners();
+        return;
+      }
       _remoteStream = stream;
       remoteRenderer.srcObject = _remoteStream;
       _log('onAddStream: remote stream attached: id=${_remoteStream!.id}');
