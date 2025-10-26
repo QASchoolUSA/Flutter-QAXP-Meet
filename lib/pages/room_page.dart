@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'package:flutter/services.dart';
 
 import '../rtc_session.dart';
 import '../signaling.dart';
@@ -21,6 +22,27 @@ class _RoomPageState extends State<RoomPage> {
   bool _uiVisible = true;
   Timer? _hideTimer;
   static const Duration _hideDelay = Duration(seconds: 3);
+
+  // Build an invite URL using the current origin and room name
+  String _buildInviteUrl() {
+    final base = Uri.base;
+    final uri = Uri(
+      scheme: base.scheme,
+      host: base.host,
+      port: base.hasPort ? base.port : null,
+      pathSegments: [widget.roomName],
+    );
+    return uri.toString();
+  }
+
+  Future<void> _copyInviteLink() async {
+    final url = _buildInviteUrl();
+    await Clipboard.setData(ClipboardData(text: url));
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Invite link copied: $url'), duration: const Duration(seconds: 2)),
+    );
+  }
 
   void _showUi() {
     if (!_uiVisible) setState(() => _uiVisible = true);
@@ -67,6 +89,13 @@ class _RoomPageState extends State<RoomPage> {
                 fontWeight: FontWeight.w600,
               ),
             ),
+            actions: [
+              IconButton(
+                tooltip: 'Copy invite link',
+                icon: const Icon(Icons.share, color: Colors.white),
+                onPressed: _copyInviteLink,
+              ),
+            ],
             elevation: 0,
             backgroundColor: Colors.black,
           ),
