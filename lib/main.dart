@@ -216,7 +216,6 @@ class _RoomPageState extends State<RoomPage> {
     final logMessage = '[QAXP-Meet] $message';
     // Use multiple logging methods to ensure visibility
     debugPrint(logMessage);
-    print(logMessage);
     // For web builds, also log to browser console
     if (kIsWeb) {
       // ignore: avoid_print

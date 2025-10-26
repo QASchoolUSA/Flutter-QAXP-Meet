@@ -13,7 +13,6 @@ class RtcSession extends ChangeNotifier {
   // WebRTC state
   MediaStream? _localStream;
   MediaStream? _remoteStream;
-  MediaStream? _remoteVideoStream; // video-only container for renderer
   RTCPeerConnection? _pc;
   RTCIceConnectionState? iceState;
 
@@ -36,6 +35,11 @@ class RtcSession extends ChangeNotifier {
   List<MediaDeviceInfo> videoInputs = [];
   String? selectedAudioInputId;
   String? selectedVideoInputId;
+
+  // Performance/guard flags
+  bool _ensureRemoteReceivingRunning = false;
+  bool _proactiveTransceiversAdded = false;
+  bool _renegotiationRunning = false;
 
   // lightweight logger to surface messages in release builds and web console
   void _log(String message) {
@@ -118,7 +122,7 @@ class RtcSession extends ChangeNotifier {
         final exists = _remoteStream!.getTracks().any((t) => t.id == e.track.id);
         if (!exists) {
           await _remoteStream!.addTrack(e.track);
-          _log('Remote ${kind} track merged into synthetic stream: id=${_remoteStream!.id}');
+          _log('Remote $kind track merged into synthetic stream: id=${_remoteStream!.id}');
         }
         target = _remoteStream;
       }
@@ -368,26 +372,24 @@ class RtcSession extends ChangeNotifier {
       case 'candidate':
         final candAny = msg['candidate'];
         if (candAny != null) {
-          String? candStr;
-          String? sdpMid;
-          int? sdpMLineIndex;
+          Map<String, dynamic> normalized = {};
           if (candAny is String) {
-            candStr = candAny;
-            sdpMid = msg['sdpMid'] as String?;
-            sdpMLineIndex = msg['sdpMLineIndex'] as int?;
-            _log('Remote ICE(unwrapped, flat): mid=$sdpMid mline=$sdpMLineIndex');
+            normalized = {
+              'candidate': candAny,
+              'sdpMid': msg['sdpMid'],
+              'sdpMLineIndex': msg['sdpMLineIndex'],
+            };
+            _log('Remote ICE(unwrapped, flat): mid=${normalized['sdpMid']} mline=${normalized['sdpMLineIndex']}');
           } else if (candAny is Map<String, dynamic>) {
-            candStr = candAny['candidate'] as String?;
-            sdpMid = candAny['sdpMid'] as String?;
-            sdpMLineIndex = candAny['sdpMLineIndex'] as int?;
-            _log('Remote ICE(unwrapped, map): mid=$sdpMid mline=$sdpMLineIndex');
+            normalized = {
+              'candidate': candAny['candidate'],
+              'sdpMid': candAny['sdpMid'],
+              'sdpMLineIndex': candAny['sdpMLineIndex'],
+            };
+            _log('Remote ICE(unwrapped, map): mid=${normalized['sdpMid']} mline=${normalized['sdpMLineIndex']}');
           }
-          if (candStr != null) {
-            try {
-              await _pc?.addCandidate(RTCIceCandidate(candStr, sdpMid, sdpMLineIndex));
-            } catch (e) {
-              _log('addCandidate(unwrapped) error: $e');
-            }
+          if (normalized['candidate'] != null) {
+            await addIceCandidate(normalized);
           }
         }
         break;
@@ -409,7 +411,7 @@ class RtcSession extends ChangeNotifier {
               }
             });
           } else {
-            _log('Negotiation trigger: $type - skipping offer (LD=${localDesc?.type}, RD=${remoteDesc?.type})');
+            _log('Negotiation trigger: $type - skipping offer (LD=${localDesc?.type}, RD=${remoteDesc.type})');
           }
         } catch (e) {
           _log('Negotiation trigger error: $e');
@@ -430,8 +432,10 @@ class RtcSession extends ChangeNotifier {
   }
 
   Future<void> _attachRemoteReceivers() async {
+    final pc = _pc;
+    if (pc == null) return;
     try {
-      final receivers = await _pc?.getReceivers() ?? [];
+      final receivers = await pc.getReceivers();
       if (receivers.isEmpty) {
         _log('No remote receivers yet');
         return;
@@ -458,6 +462,11 @@ class RtcSession extends ChangeNotifier {
   }
 
   Future<void> _ensureRemoteReceiving() async {
+    if (_ensureRemoteReceivingRunning) {
+      _log('ensureRemoteReceiving already running; skip');
+      return;
+    }
+    _ensureRemoteReceivingRunning = true;
     try {
       final receivers = await _pc?.getReceivers() ?? [];
       final hasVideo = receivers.any((r) => r.track?.kind == 'video');
@@ -469,15 +478,18 @@ class RtcSession extends ChangeNotifier {
       }
       // If no receivers yet, proactively add recvonly transceivers to ensure m-lines exist
       try {
-        await _pc?.addTransceiver(
-          kind: RTCRtpMediaType.RTCRtpMediaTypeVideo,
-          init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
-        );
-        await _pc?.addTransceiver(
-          kind: RTCRtpMediaType.RTCRtpMediaTypeAudio,
-          init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
-        );
-        _log('Proactively added recvonly transceivers for video/audio');
+        if (!_proactiveTransceiversAdded) {
+          await _pc?.addTransceiver(
+            kind: RTCRtpMediaType.RTCRtpMediaTypeVideo,
+            init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
+          );
+          await _pc?.addTransceiver(
+            kind: RTCRtpMediaType.RTCRtpMediaTypeAudio,
+            init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
+          );
+          _proactiveTransceiversAdded = true;
+          _log('Proactively added recvonly transceivers for video/audio');
+        }
       } catch (e) {
         _log('addTransceiver proactive error: $e');
       }
@@ -485,18 +497,24 @@ class RtcSession extends ChangeNotifier {
       final receivers2 = await _pc?.getReceivers() ?? [];
       if (receivers2.isEmpty) {
         _log('No remote receivers after delay; triggering renegotiation');
-        _restartIceAndRenegotiate('no_remote_receivers');
+        if (!_renegotiationRunning) {
+          _restartIceAndRenegotiate('no_remote_receivers');
+        }
       } else {
         await _attachRemoteReceivers();
         // If video still absent, force renegotiation to propagate new m-lines
         final hasVideo2 = receivers2.any((r) => r.track?.kind == 'video');
         if (!hasVideo2) {
           _log('No video receivers after transceiver add; renegotiating');
-          _restartIceAndRenegotiate('ensure_video_mline');
+          if (!_renegotiationRunning) {
+            _restartIceAndRenegotiate('ensure_video_mline');
+          }
         }
       }
     } catch (e) {
       _log('ensure remote receiving error: $e');
+    } finally {
+      _ensureRemoteReceivingRunning = false;
     }
   }
 
@@ -540,6 +558,11 @@ class RtcSession extends ChangeNotifier {
   }
 
   Future<void> _restartIceAndRenegotiate(String reason) async {
+    if (_renegotiationRunning) {
+      _log('Renegotiation already running; skip reason=$reason');
+      return;
+    }
+    _renegotiationRunning = true;
     renegotiationAttempts++;
     try {
       _log('ICE restart + renegotiate, reason=$reason');
@@ -556,6 +579,8 @@ class RtcSession extends ChangeNotifier {
       });
     } catch (e) {
       _log('Renegotiate error: $e');
+    } finally {
+      _renegotiationRunning = false;
     }
   }
 
@@ -606,6 +631,15 @@ class RtcSession extends ChangeNotifier {
       _log('Hangup: closing signaling and peer connection');
       await _sig?.close();
       await _pc?.close();
+      try {
+        for (final t in _localStream?.getTracks() ?? []) {
+          await t.stop();
+        }
+        await _localStream?.dispose();
+      } catch (_) {}
+      try {
+        await _remoteStream?.dispose();
+      } catch (_) {}
       await localRenderer.dispose();
       await remoteRenderer.dispose();
     } catch (e) {
