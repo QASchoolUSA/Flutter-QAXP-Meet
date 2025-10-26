@@ -301,13 +301,26 @@ class RtcSession extends ChangeNotifier {
         break;
       case 'ready':
       case 'start_negotiation':
-        final isIOS = defaultTargetPlatform == TargetPlatform.iOS;
-        if (isIOS) {
-          _log('Negotiation trigger: $type (iOS will offer)');
-          _startCall();
-        } else {
-          _log('Negotiation trigger: $type (non-iOS waits for remote offer)');
-          // Do not create offer here; expect remote iOS peer to offer with H264
+        try {
+          final localDesc = await _pc?.getLocalDescription();
+          final remoteDesc = await _pc?.getRemoteDescription();
+          if (remoteDesc == null && (localDesc == null || localDesc.type != 'offer')) {
+            _log('Negotiation trigger: $type - creating offer');
+            _startCall();
+            // Fallback: if remote desc still not set after short delay, ensure we offered
+            Future.delayed(const Duration(seconds: 2), () async {
+              final rd = await _pc?.getRemoteDescription();
+              final ld = await _pc?.getLocalDescription();
+              if (rd == null && (ld == null || ld.type != 'offer')) {
+                _log('Negotiation fallback: no remote/offer after delay, creating offer');
+                _startCall();
+              }
+            });
+          } else {
+            _log('Negotiation trigger: $type - skipping offer (LD=${localDesc?.type}, RD=${remoteDesc?.type})');
+          }
+        } catch (e) {
+          _log('Negotiation trigger error: $e');
         }
         break;
       case 'ws_closed':
