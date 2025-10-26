@@ -78,13 +78,15 @@ class RtcSession extends ChangeNotifier {
 
     _pc!.onIceCandidate = (RTCIceCandidate c) {
       _log('Local ICE candidate: mid=${c.sdpMid} mline=${c.sdpMLineIndex}');
-      // Send using server's expected signal wrapper
+      // Send using server's expected signal wrapper with explicit fields
       _sig?.send({
         'type': 'signal',
         'room': _roomName,
         'payload': {
           'type': 'candidate',
-          'candidate': c.toMap(),
+          'candidate': c.candidate,
+          'sdpMid': c.sdpMid,
+          'sdpMLineIndex': c.sdpMLineIndex,
         }
       });
     };
