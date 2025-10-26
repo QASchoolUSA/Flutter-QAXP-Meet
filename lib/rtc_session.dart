@@ -332,6 +332,28 @@ class RtcSession extends ChangeNotifier {
           _log('Peer joined negotiation error: $e');
         }
         break;
+      case 'peer_left':
+      case 'peer-left':
+      case 'leave':
+        _log('Peer left - clearing remote renderer and stream');
+        try {
+          // Stop and clear any remote tracks to release the last frame
+          final rs = _remoteStream;
+          if (rs != null) {
+            for (final t in rs.getTracks()) {
+              try {
+                t.stop();
+              } catch (_) {}
+            }
+          }
+          remoteRenderer.srcObject = null;
+          _remoteStream = null;
+          peerJoined = false;
+          notifyListeners();
+        } catch (e) {
+          _log('Peer left cleanup error: $e');
+        }
+        break;
       case 'offer':
         {
           final sdpOffer = msg['sdp'] as String? ??
