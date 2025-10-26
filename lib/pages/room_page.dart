@@ -141,8 +141,11 @@ class _RoomPageState extends State<RoomPage> {
   }
 
   Widget _buildVideoArea() {
-    final remoteHas = _session.remoteRenderer.srcObject != null;
+    final remoteStream = _session.remoteRenderer.srcObject;
+    final remoteHasVideo = remoteStream?.getVideoTracks().isNotEmpty ?? false;
+    final remoteHas = remoteStream != null && remoteHasVideo;
     final localHas = _session.localRenderer.srcObject != null;
+    debugPrint('[RoomPage] video area: remoteHas=$remoteHas remoteTracks=${remoteStream?.getTracks().length ?? 0} localHas=$localHas');
 
     if (remoteHas) {
       return _videoFill(_session.remoteRenderer);
