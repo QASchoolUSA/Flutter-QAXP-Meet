@@ -238,13 +238,27 @@ class RtcSession extends ChangeNotifier {
         _ensureRemoteReceiving();
         return;
       } else if ((ptype == 'candidate' || ptype == 'ice') && payload['candidate'] != null) {
-        final c = payload['candidate'];
-        try {
-          _log('Remote ICE candidate(via wrapper): mid=${c['sdpMid']} mline=${c['sdpMLineIndex']}');
-          await _pc?.addCandidate(
-              RTCIceCandidate(c['candidate'], c['sdpMid'], c['sdpMLineIndex']));
-        } catch (e) {
-          _log('addCandidate error: $e');
+        final candAny = payload['candidate'];
+        String? candStr;
+        String? sdpMid;
+        int? sdpMLineIndex;
+        if (candAny is String) {
+          candStr = candAny;
+          sdpMid = payload['sdpMid'] as String?;
+          sdpMLineIndex = payload['sdpMLineIndex'] as int?;
+          _log('Remote ICE(candidate wrapper, flat): mid=$sdpMid mline=$sdpMLineIndex');
+        } else if (candAny is Map<String, dynamic>) {
+          candStr = candAny['candidate'] as String?;
+          sdpMid = candAny['sdpMid'] as String?;
+          sdpMLineIndex = candAny['sdpMLineIndex'] as int?;
+          _log('Remote ICE(candidate wrapper, map): mid=$sdpMid mline=$sdpMLineIndex');
+        }
+        if (candStr != null) {
+          try {
+            await _pc?.addCandidate(RTCIceCandidate(candStr, sdpMid, sdpMLineIndex));
+          } catch (e) {
+            _log('addCandidate(wrapper) error: $e');
+          }
         }
         return;
       }
@@ -290,14 +304,28 @@ class RtcSession extends ChangeNotifier {
         break;
       case 'ice':
       case 'candidate':
-        final c = msg['candidate'];
-        if (c != null) {
-          try {
-            _log('Remote ICE candidate: mid=${c['sdpMid']} mline=${c['sdpMLineIndex']}');
-            await _pc?.addCandidate(RTCIceCandidate(
-                c['candidate'], c['sdpMid'], c['sdpMLineIndex']));
-          } catch (e) {
-            _log('addCandidate error: $e');
+        final candAny = msg['candidate'];
+        if (candAny != null) {
+          String? candStr;
+          String? sdpMid;
+          int? sdpMLineIndex;
+          if (candAny is String) {
+            candStr = candAny;
+            sdpMid = msg['sdpMid'] as String?;
+            sdpMLineIndex = msg['sdpMLineIndex'] as int?;
+            _log('Remote ICE(unwrapped, flat): mid=$sdpMid mline=$sdpMLineIndex');
+          } else if (candAny is Map<String, dynamic>) {
+            candStr = candAny['candidate'] as String?;
+            sdpMid = candAny['sdpMid'] as String?;
+            sdpMLineIndex = candAny['sdpMLineIndex'] as int?;
+            _log('Remote ICE(unwrapped, map): mid=$sdpMid mline=$sdpMLineIndex');
+          }
+          if (candStr != null) {
+            try {
+              await _pc?.addCandidate(RTCIceCandidate(candStr, sdpMid, sdpMLineIndex));
+            } catch (e) {
+              _log('addCandidate(unwrapped) error: $e');
+            }
           }
         }
         break;
