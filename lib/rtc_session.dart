@@ -40,6 +40,7 @@ class RtcSession extends ChangeNotifier {
   bool _ensureRemoteReceivingRunning = false;
   bool _proactiveTransceiversAdded = false;
   bool _renegotiationRunning = false;
+  bool _sendersTuned = false;
 
   // lightweight logger to surface messages in release builds and web console
   void _log(String message) {
@@ -63,6 +64,10 @@ class RtcSession extends ChangeNotifier {
         {'urls': ['stun:stun.l.google.com:19302']},
       ],
       'sdpSemantics': 'unified-plan',
+      'bundlePolicy': 'max-bundle',
+      'rtcpMuxPolicy': 'require',
+      'iceTransportPolicy': 'all',
+      'iceCandidatePoolSize': 10,
     };
     _pc = await createPeerConnection(configuration);
 
@@ -77,6 +82,7 @@ class RtcSession extends ChangeNotifier {
         _log('ICE failed; attempting ICE restart and renegotiation');
         _restartIceAndRenegotiate('ice_failed');
       } else if (state == RTCIceConnectionState.RTCIceConnectionStateConnected) {
+        _tuneSenderEncodings();
         _ensureRemoteReceiving();
       }
     };
@@ -169,21 +175,26 @@ class RtcSession extends ChangeNotifier {
   }
 
   Future<void> _setupLocalMedia({bool audio = true, bool video = true}) async {
-    final audioConstraints = selectedAudioInputId == null
-        ? (audio ? true : false)
-        : {
-            'deviceId': selectedAudioInputId,
-          };
-    final isMobile = defaultTargetPlatform == TargetPlatform.iOS ||
-        defaultTargetPlatform == TargetPlatform.android;
+    final audioConstraints = audio
+        ? {
+            if (selectedAudioInputId != null)
+              'deviceId': kIsWeb ? {'exact': selectedAudioInputId} : selectedAudioInputId,
+            'echoCancellation': true,
+            'noiseSuppression': true,
+            'autoGainControl': true,
+            'sampleRate': 48000,
+            'channelCount': 2,
+          }
+        : false;
     final videoConstraints = video
-        ? (kIsWeb
-            ? (selectedVideoInputId == null
-                ? {'facingMode': 'user'}
-                : {
-                    'deviceId': selectedVideoInputId,
-                  })
-            : (isMobile ? {'facingMode': 'user'} : true))
+        ? {
+            if (kIsWeb && selectedVideoInputId != null)
+              'deviceId': {'exact': selectedVideoInputId},
+            'facingMode': 'user',
+            'width': {'ideal': 1280, 'max': 1920, 'min': 640},
+            'height': {'ideal': 720, 'max': 1080, 'min': 480},
+            'frameRate': {'ideal': 30, 'max': 60, 'min': 15},
+          }
         : false;
 
     final constraints = {
@@ -198,6 +209,26 @@ class RtcSession extends ChangeNotifier {
       _localStream = stream;
       localRenderer.srcObject = _localStream;
       _log('Local media acquired: id=${stream.id} tracks=${stream.getTracks().length}');
+
+      // Default video disabled; can be toggled on by UI
+      final videoTracks = stream.getVideoTracks();
+      if (videoTracks.isNotEmpty) {
+        try {
+          videoTracks.first.enabled = false;
+          await videoTracks.first.applyConstraints({
+            'width': {'ideal': 1280, 'max': 1920},
+            'height': {'ideal': 720, 'max': 1080},
+            'frameRate': {'ideal': 30, 'max': 60},
+            'advanced': [
+              {'width': {'min': 640}},
+              {'height': {'min': 480}},
+              {'frameRate': {'min': 15}},
+            ],
+          });
+        } catch (e) {
+          _log('applyConstraints(video) not supported or failed: $e');
+        }
+      }
 
       for (final track in stream.getTracks()) {
         await _pc?.addTrack(track, stream);
@@ -245,10 +276,7 @@ class RtcSession extends ChangeNotifier {
         await _pc?.setRemoteDescription(
             RTCSessionDescription(payload['sdp'], 'offer'));
         final answer = await _pc!.createAnswer();
-        var sdpA = answer.sdp ?? '';
-        if (kIsWeb) {
-          sdpA = _preferH264(sdpA);
-        }
+        final sdpA = answer.sdp ?? '';
         await _pc!.setLocalDescription(RTCSessionDescription(sdpA, 'answer'));
         _log('Answer(created): sdpLen=${sdpA.length}');
         _sig?.send({
@@ -545,13 +573,10 @@ class RtcSession extends ChangeNotifier {
     try {
       _log('Creating offer...');
       final offer = await _pc!.createOffer();
-      var sdp = offer.sdp ?? '';
-      if (kIsWeb) {
-        sdp = _preferH264(sdp);
-      }
-      final mungedOffer = RTCSessionDescription(sdp, 'offer');
+      final sdp = offer.sdp ?? '';
+      final localOffer = RTCSessionDescription(sdp, 'offer');
       _log('Offer created: sdpLen=${sdp.length}');
-      await _pc!.setLocalDescription(mungedOffer);
+      await _pc!.setLocalDescription(localOffer);
       _log('Local description set');
       // Send using server's expected signal wrapper
       _sig?.send({
@@ -589,10 +614,7 @@ class RtcSession extends ChangeNotifier {
     try {
       _log('ICE restart + renegotiate, reason=$reason');
       final offer = await _pc!.createOffer({'iceRestart': true});
-      var sdp = offer.sdp ?? '';
-      if (kIsWeb) {
-        sdp = _preferH264(sdp);
-      }
+      final sdp = offer.sdp ?? '';
       await _pc!.setLocalDescription(RTCSessionDescription(sdp, 'offer'));
       _sig?.send({
         'type': 'signal',
@@ -603,6 +625,36 @@ class RtcSession extends ChangeNotifier {
       _log('Renegotiate error: $e');
     } finally {
       _renegotiationRunning = false;
+    }
+  }
+
+  Future<void> _tuneSenderEncodings() async {
+    final pc = _pc;
+    if (pc == null || _sendersTuned) return;
+    try {
+      final senders = await pc.getSenders();
+      for (final s in senders) {
+        if (s.track?.kind == 'video') {
+          try {
+            final params = RTCRtpParameters(
+              encodings: [
+                RTCRtpEncoding(
+                  maxBitrate: 2500000,
+                  maxFramerate: 30,
+                  scaleResolutionDownBy: 1.0,
+                )
+              ],
+            );
+            await s.setParameters(params);
+          } catch (e) {
+            _log('setParameters(video) error: $e');
+          }
+        }
+      }
+      _sendersTuned = true;
+      _log('Video sender encodings tuned (≈2.5 Mbps, 30 fps).');
+    } catch (e) {
+      _log('tune sender encodings error: $e');
     }
   }
 
