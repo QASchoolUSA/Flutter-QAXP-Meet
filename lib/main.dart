@@ -5,8 +5,10 @@ import 'dart:convert';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'dart:async';
 import 'pages/room_page.dart' as pages;
+import 'package:flutter_web_plugins/url_strategy.dart';
 
 void main() {
+  setUrlStrategy(PathUrlStrategy());
   runApp(const MyApp());
 }
 
@@ -36,6 +38,12 @@ class _HomePageState extends State<HomePage> {
   String? _roomError;
   bool _isRoomValid = false;
 
+  @override
+  void initState() {
+    super.initState();
+    _maybeAutoJoinFromUrl();
+  }
+
   void _validateRoomName(String value) {
     final room = value.trim();
     if (room.isEmpty) {
@@ -64,9 +72,40 @@ class _HomePageState extends State<HomePage> {
       );
       return;
     }
+    _enterRoomWith(room);
+  }
+
+  void _enterRoomWith(String room) {
     Navigator.of(context).push(
       MaterialPageRoute(builder: (_) => pages.RoomPage(roomName: room)),
     );
+  }
+
+  String? _roomFromUrl() {
+    final uri = Uri.base;
+    String? candidate;
+    if (uri.pathSegments.isNotEmpty) {
+      candidate = uri.pathSegments.first;
+    } else if (uri.fragment.isNotEmpty) {
+      final frag = uri.fragment.startsWith('/') ? uri.fragment : '/${uri.fragment}';
+      final furi = Uri.parse(frag);
+      if (furi.pathSegments.isNotEmpty) {
+        candidate = furi.pathSegments.first;
+      }
+    }
+    if (candidate == null) return null;
+    final room = Uri.decodeComponent(candidate.trim());
+    return _roomNameRegex.hasMatch(room) ? room : null;
+  }
+
+  void _maybeAutoJoinFromUrl() {
+    final room = _roomFromUrl();
+    if (room != null) {
+      _roomController.text = room;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _enterRoomWith(room);
+      });
+    }
   }
 
   @override
