@@ -272,7 +272,7 @@ class RtcSession extends ChangeNotifier {
               RTCSessionDescription(msg['sdp'], 'offer'));
           final answer = await _pc!.createAnswer();
           var sdpA = answer.sdp ?? '';
-          if (defaultTargetPlatform == TargetPlatform.iOS) {
+          if (kIsWeb) {
             sdpA = _preferH264(sdpA);
           }
           await _pc!.setLocalDescription(RTCSessionDescription(sdpA, 'answer'));
@@ -415,7 +415,7 @@ class RtcSession extends ChangeNotifier {
       _log('Creating offer...');
       final offer = await _pc!.createOffer();
       var sdp = offer.sdp ?? '';
-      if (defaultTargetPlatform == TargetPlatform.iOS) {
+      if (kIsWeb) {
         sdp = _preferH264(sdp);
       }
       final mungedOffer = RTCSessionDescription(sdp, 'offer');
@@ -440,7 +440,7 @@ class RtcSession extends ChangeNotifier {
       _log('ICE restart + renegotiate, reason=$reason');
       final offer = await _pc!.createOffer({'iceRestart': true});
       var sdp = offer.sdp ?? '';
-      if (defaultTargetPlatform == TargetPlatform.iOS) {
+      if (kIsWeb) {
         sdp = _preferH264(sdp);
       }
       await _pc!.setLocalDescription(RTCSessionDescription(sdp, 'offer'));
