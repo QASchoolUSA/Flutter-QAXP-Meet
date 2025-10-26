@@ -29,6 +29,7 @@ class RtcSession extends ChangeNotifier {
   // Peer state
   bool peerJoined = false;
   int renegotiationAttempts = 0;
+  String? role; // 'caller' | 'callee' | null
 
   // Device selection state
   List<MediaDeviceInfo> audioInputs = [];
@@ -265,11 +266,42 @@ class RtcSession extends ChangeNotifier {
     switch (type) {
       case 'joined':
         peerJoined = true;
-        _log('Peer joined/acknowledged');
+        role = msg['role'] as String?;
+        _log('Peer joined/acknowledged; role=${role ?? 'unknown'}');
         notifyListeners();
+        try {
+          final ld = await _pc?.getLocalDescription();
+          final rd = await _pc?.getRemoteDescription();
+          if ((role == 'caller') && rd == null && (ld == null || ld.type != 'offer')) {
+            _log('Joined as caller; creating offer');
+            _startCall();
+          }
+        } catch (_) {}
+        // Proactive negotiation kick for callee/unknown roles
+        try {
+          final ld2 = await _pc?.getLocalDescription();
+          final rd2 = await _pc?.getRemoteDescription();
+          if ((role != 'caller') && rd2 == null && (ld2 == null || ld2.type != 'offer')) {
+            _log('Joined as callee/unknown; sending ready to prompt negotiation');
+            _sig?.send({'type': 'ready', 'room': _roomName});
+          }
+        } catch (e) {
+          _log('Joined ready send error: $e');
+        }
         break;
       case 'peer_joined':
+      case 'peer-joined':
         _log('Peer joined event');
+        try {
+          final ld = await _pc?.getLocalDescription();
+          final rd = await _pc?.getRemoteDescription();
+          if ((role == 'caller' || role == null) && rd == null && (ld == null || ld.type != 'offer')) {
+            _log('Peer joined trigger; creating offer');
+            _startCall();
+          }
+        } catch (e) {
+          _log('Peer joined negotiation error: $e');
+        }
         break;
       case 'offer':
         if (msg['sdp'] != null) {
