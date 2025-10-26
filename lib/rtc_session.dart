@@ -177,7 +177,7 @@ class RtcSession extends ChangeNotifier {
   Future<void> _setupLocalMedia({bool audio = true, bool video = true}) async {
     final audioConstraints = audio
         ? {
-            if (selectedAudioInputId != null)
+            if (selectedAudioInputId != null && (selectedAudioInputId?.isNotEmpty ?? false))
               'deviceId': kIsWeb ? {'exact': selectedAudioInputId} : selectedAudioInputId,
             'echoCancellation': true,
             'noiseSuppression': true,
@@ -188,7 +188,7 @@ class RtcSession extends ChangeNotifier {
         : false;
     final videoConstraints = video
         ? {
-            if (kIsWeb && selectedVideoInputId != null)
+            if (kIsWeb && selectedVideoInputId != null && (selectedVideoInputId?.isNotEmpty ?? false))
               'deviceId': {'exact': selectedVideoInputId},
             'facingMode': 'user',
             'width': {'ideal': 1280, 'max': 1920, 'min': 640},
@@ -240,7 +240,50 @@ class RtcSession extends ChangeNotifier {
       // Capture error for UI surfaces; common causes: permission denied, insecure context
       mediaError = e.toString();
       _log('getUserMedia error: $mediaError');
-      notifyListeners();
+      // Retry without deviceId if OverconstrainedError/NotFound or empty device IDs present
+      final isOver = mediaError?.contains('OverconstrainedError') == true || mediaError?.contains('NotFoundError') == true;
+      final hadEmptyIds = (selectedAudioInputId != null && (selectedAudioInputId?.isEmpty ?? false)) || (selectedVideoInputId != null && (selectedVideoInputId?.isEmpty ?? false));
+      if (isOver || hadEmptyIds) {
+        try {
+          _log('Retrying getUserMedia without deviceId constraints');
+          final retryConstraints = {
+            'audio': audio ? {
+              'echoCancellation': true,
+              'noiseSuppression': true,
+              'autoGainControl': true,
+              'sampleRate': 48000,
+              'channelCount': 2,
+            } : false,
+            'video': video ? {
+              'facingMode': 'user',
+              'width': {'ideal': 1280, 'max': 1920, 'min': 640},
+              'height': {'ideal': 720, 'max': 1080, 'min': 480},
+              'frameRate': {'ideal': 30, 'max': 60, 'min': 15},
+            } : false,
+          };
+          final stream2 = await navigator.mediaDevices.getUserMedia(retryConstraints);
+          mediaError = null;
+          _localStream = stream2;
+          localRenderer.srcObject = _localStream;
+          _log('Local media acquired on retry: id=${stream2.id}');
+          final videoTracks2 = stream2.getVideoTracks();
+          if (videoTracks2.isNotEmpty) {
+            try {
+              videoTracks2.first.enabled = false;
+            } catch (_) {}
+          }
+          for (final track in stream2.getTracks()) {
+            await _pc?.addTrack(track, stream2);
+          }
+          await loadDevices();
+          notifyListeners();
+        } catch (e2) {
+          _log('Retry getUserMedia failed: $e2');
+          notifyListeners();
+        }
+      } else {
+        notifyListeners();
+      }
     }
   }
 
@@ -572,6 +615,7 @@ class RtcSession extends ChangeNotifier {
     if (_pc == null) return;
     try {
       _log('Creating offer...');
+      await _ensureTransceiversForOffer();
       final offer = await _pc!.createOffer();
       final sdp = offer.sdp ?? '';
       final localOffer = RTCSessionDescription(sdp, 'offer');
@@ -613,6 +657,7 @@ class RtcSession extends ChangeNotifier {
     renegotiationAttempts++;
     try {
       _log('ICE restart + renegotiate, reason=$reason');
+      await _ensureTransceiversForOffer();
       final offer = await _pc!.createOffer({'iceRestart': true});
       final sdp = offer.sdp ?? '';
       await _pc!.setLocalDescription(RTCSessionDescription(sdp, 'offer'));
@@ -625,6 +670,27 @@ class RtcSession extends ChangeNotifier {
       _log('Renegotiate error: $e');
     } finally {
       _renegotiationRunning = false;
+    }
+  }
+
+  Future<void> _ensureTransceiversForOffer() async {
+    final pc = _pc;
+    if (pc == null) return;
+    try {
+      final tx = await pc.getTransceivers();
+      if (tx.isEmpty) {
+        await pc.addTransceiver(
+          kind: RTCRtpMediaType.RTCRtpMediaTypeVideo,
+          init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
+        );
+        await pc.addTransceiver(
+          kind: RTCRtpMediaType.RTCRtpMediaTypeAudio,
+          init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
+        );
+        _log('Added recvonly transceivers before offer to ensure BUNDLE group');
+      }
+    } catch (e) {
+      _log('ensureTransceiversForOffer error: $e');
     }
   }
 
