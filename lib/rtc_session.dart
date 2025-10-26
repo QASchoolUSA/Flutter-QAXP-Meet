@@ -467,6 +467,20 @@ class RtcSession extends ChangeNotifier {
         'payload': {'type': 'offer', 'sdp': sdp},
       });
       _log('Offer sent');
+      // Add timeout to check for answer and renegotiate if stalled
+      Future.delayed(const Duration(seconds: 5), () async {
+        try {
+          final rd = await _pc?.getRemoteDescription();
+          if (rd == null) {
+            _log('No answer after timeout; triggering renegotiation');
+            await _restartIceAndRenegotiate('no_answer_timeout');
+          } else {
+            _log('Answer received within timeout');
+          }
+        } catch (e) {
+          _log('Timeout check error: $e');
+        }
+      });
     } catch (e) {
       _log('Start call error: $e');
     }
