@@ -150,12 +150,10 @@ class _RoomPageState extends State<RoomPage> {
     if (remoteHas) {
       return _videoFill(_session.remoteRenderer);
     }
-    if (localHas) {
-      return _videoFill(_session.localRenderer);
-    }
+    // Do not fall back to local in main area; keep local only in PiP to avoid confusion
     return Center(
       child: Text(
-        'Waiting for media...',
+        'Waiting for other participant\'s video...',
         style: const TextStyle(color: Colors.white70),
       ),
     );

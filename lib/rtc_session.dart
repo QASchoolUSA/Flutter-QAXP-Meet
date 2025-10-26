@@ -442,6 +442,20 @@ class RtcSession extends ChangeNotifier {
         await _attachRemoteReceivers();
         return;
       }
+      // If no receivers yet, proactively add recvonly transceivers to ensure m-lines exist
+      try {
+        await _pc?.addTransceiver(
+          kind: RTCRtpMediaType.RTCRtpMediaTypeVideo,
+          init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
+        );
+        await _pc?.addTransceiver(
+          kind: RTCRtpMediaType.RTCRtpMediaTypeAudio,
+          init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
+        );
+        _log('Proactively added recvonly transceivers for video/audio');
+      } catch (e) {
+        _log('addTransceiver proactive error: $e');
+      }
       await Future.delayed(const Duration(milliseconds: 600));
       final receivers2 = await _pc?.getReceivers() ?? [];
       if (receivers2.isEmpty) {
@@ -449,6 +463,12 @@ class RtcSession extends ChangeNotifier {
         _restartIceAndRenegotiate('no_remote_receivers');
       } else {
         await _attachRemoteReceivers();
+        // If video still absent, force renegotiation to propagate new m-lines
+        final hasVideo2 = receivers2.any((r) => r.track?.kind == 'video');
+        if (!hasVideo2) {
+          _log('No video receivers after transceiver add; renegotiating');
+          _restartIceAndRenegotiate('ensure_video_mline');
+        }
       }
     } catch (e) {
       _log('ensure remote receiving error: $e');
