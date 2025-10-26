@@ -95,32 +95,23 @@ class RtcSession extends ChangeNotifier {
       final kind = e.track.kind;
       _log('onTrack: kind=$kind id=${e.track.id} streams=${e.streams.length}');
 
-      if (kind == 'video') {
-        _remoteVideoStream ??= await createLocalMediaStream('remotev');
-        final vstream = _remoteVideoStream!;
-        final exists = vstream.getVideoTracks().any((t) => t.id == e.track.id);
+      // Prefer the peer-provided stream; otherwise merge into a single remote container
+      MediaStream? target;
+      if (e.streams.isNotEmpty) {
+        target = e.streams.first;
+        _remoteStream = target;
+        _log('Remote stream attached (from peer): id=${target.id}');
+      } else {
+        _remoteStream ??= await createLocalMediaStream('remote');
+        final exists = _remoteStream!.getTracks().any((t) => t.id == e.track.id);
         if (!exists) {
-          await vstream.addTrack(e.track);
-          _log('Remote video track attached to video-only stream: id=${e.track.id}');
+          await _remoteStream!.addTrack(e.track);
+          _log('Remote ${kind} track merged into synthetic stream: id=${_remoteStream!.id}');
         }
-        remoteRenderer.srcObject = vstream;
-        notifyListeners();
-        return;
+        target = _remoteStream;
       }
 
-      // Audio or other tracks
-      if (e.streams.isEmpty) {
-        _remoteStream ??= await createLocalMediaStream('remote');
-        _remoteStream!.addTrack(e.track);
-        _log('Remote $kind track attached via synthetic stream: id=${_remoteStream!.id}');
-      } else {
-        _remoteStream = e.streams.first;
-        _log('Remote stream attached: id=${_remoteStream!.id}');
-      }
-      // Keep renderer pointed at video-only stream if present; otherwise use full stream
-      if (_remoteVideoStream == null) {
-        remoteRenderer.srcObject = _remoteStream;
-      }
+      remoteRenderer.srcObject = target;
       notifyListeners();
     };
 
@@ -387,12 +378,7 @@ class RtcSession extends ChangeNotifier {
         }
       }
       if (remote.getTracks().isNotEmpty) {
-        // Prefer the dedicated video-only stream for renderer to avoid web rendering quirks
-        if (_remoteVideoStream != null) {
-          remoteRenderer.srcObject = _remoteVideoStream;
-        } else {
-          remoteRenderer.srcObject = remote;
-        }
+        remoteRenderer.srcObject = remote;
         notifyListeners();
       }
     } catch (e) {
