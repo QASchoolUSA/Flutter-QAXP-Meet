@@ -304,31 +304,39 @@ class RtcSession extends ChangeNotifier {
         }
         break;
       case 'offer':
-        if (msg['sdp'] != null) {
-          _log('Offer received: sdpLen=${(msg['sdp'] as String).length}');
-          await _pc?.setRemoteDescription(
-              RTCSessionDescription(msg['sdp'], 'offer'));
-          final answer = await _pc!.createAnswer();
-          var sdpA = answer.sdp ?? '';
-          if (kIsWeb) {
-            sdpA = _preferH264(sdpA);
+        {
+          final sdpOffer = msg['sdp'] as String? ??
+              (msg['offer'] is Map ? (msg['offer']['sdp'] as String?) : null);
+          if (sdpOffer != null) {
+            _log('Offer received: sdpLen=${sdpOffer.length}');
+            await _pc?.setRemoteDescription(
+                RTCSessionDescription(sdpOffer, 'offer'));
+            final answer = await _pc!.createAnswer();
+            var sdpA = answer.sdp ?? '';
+            if (kIsWeb) {
+              sdpA = _preferH264(sdpA);
+            }
+            await _pc!.setLocalDescription(RTCSessionDescription(sdpA, 'answer'));
+            _log('Answer created: sdpLen=${sdpA.length}');
+            _sig?.send({
+              'type': 'signal',
+              'room': _roomName,
+              'payload': {'type': 'answer', 'sdp': sdpA},
+            });
+            _ensureRemoteReceiving();
           }
-          await _pc!.setLocalDescription(RTCSessionDescription(sdpA, 'answer'));
-          _log('Answer created: sdpLen=${sdpA.length}');
-          _sig?.send({
-            'type': 'signal',
-            'room': _roomName,
-            'payload': {'type': 'answer', 'sdp': sdpA},
-          });
-          _ensureRemoteReceiving();
         }
         break;
       case 'answer':
-        if (msg['sdp'] != null) {
-          _log('Answer received: sdpLen=${(msg['sdp'] as String).length}');
-          await _pc?.setRemoteDescription(
-              RTCSessionDescription(msg['sdp'], 'answer'));
-          _ensureRemoteReceiving();
+        {
+          final sdpAns = msg['sdp'] as String? ??
+              (msg['answer'] is Map ? (msg['answer']['sdp'] as String?) : null);
+          if (sdpAns != null) {
+            _log('Answer received: sdpLen=${sdpAns.length}');
+            await _pc?.setRemoteDescription(
+                RTCSessionDescription(sdpAns, 'answer'));
+            _ensureRemoteReceiving();
+          }
         }
         break;
       case 'ice':
@@ -530,6 +538,13 @@ class RtcSession extends ChangeNotifier {
       t.enabled = !t.enabled;
     }
     notifyListeners();
+    // Ensure remote can reflect new m-line state if video was added/removed
+    try {
+      final rd = await _pc?.getRemoteDescription();
+      if (rd != null) {
+        _restartIceAndRenegotiate('video_toggle');
+      }
+    } catch (_) {}
   }
 
   Future<void> addIceCandidate(Map<String, dynamic> candidate) async {
