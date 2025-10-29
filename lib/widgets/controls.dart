@@ -29,6 +29,7 @@ class CallControls extends StatelessWidget {
           child: Icon(micIcon),
         ),
         const SizedBox(width: 12),
+        const SizedBox(width: 12),
         ElevatedButton(
           onPressed: s.toggleVideo,
           style: ButtonStyle(

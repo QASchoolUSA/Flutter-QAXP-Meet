@@ -2,6 +2,9 @@ import 'dart:async';
 import 'dart:developer' as developer;
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'package:web/web.dart' as web;
+import 'dart:js_interop';
+import 'dart:js_util' as js_util;
 
 import 'signaling.dart';
 
@@ -41,6 +44,19 @@ class RtcSession extends ChangeNotifier {
   bool _proactiveTransceiversAdded = false;
   bool _renegotiationRunning = false;
   bool _sendersTuned = false;
+  // Call-wide audio recording (via flutter_webrtc MediaRecorder)
+  MediaStream? _mixStream;
+  MediaRecorder? _recorder;
+  // Web recording pipeline (WebAudio + MediaRecorder)
+  web.AudioContext? _audioCtx;
+  web.MediaStreamAudioDestinationNode? _destNode;
+  web.MediaRecorder? _webRecorder;
+  web.Blob? _lastBlob;
+  bool isRecording = false;
+  bool uploadInProgress = false;
+  double uploadProgress = 0.0; // 0.0..1.0
+  String? recordingStatus; // human-readable state
+  Uri? recordUploadUrl; // set by app for server upload
 
   // lightweight logger to surface messages in release builds and web console
   void _log(String message) {
@@ -141,6 +157,21 @@ class RtcSession extends ChangeNotifier {
         remoteRenderer.srcObject = target;
         notifyListeners();
       }
+      if (kind == 'audio') {
+        // Connect to web recorder destination if active
+        if (kIsWeb && _destNode != null) {
+          try {
+            final remoteWeb = _asWebMediaStream(_remoteStream ?? target);
+            if (remoteWeb != null && _audioCtx != null) {
+              final src = _audioCtx!.createMediaStreamSource(remoteWeb);
+              src.connect(_destNode!);
+            }
+          } catch (_) {}
+        }
+        // Maintain mixed stream for potential native recorder
+        await _ensureMixStream();
+        await _maybeAddStreamToMix(_remoteStream ?? target);
+      }
     };
 
     // Fallback for older/Plan-B style backends
@@ -233,6 +264,18 @@ class RtcSession extends ChangeNotifier {
       for (final track in stream.getTracks()) {
         await _pc?.addTrack(track, stream);
       }
+      await _ensureMixStream();
+      await _maybeAddStreamToMix(_localStream);
+      // Connect local audio to web recorder destination if active
+      if (kIsWeb && _destNode != null) {
+        try {
+          final localWeb = _asWebMediaStream(_localStream);
+          if (localWeb != null && _audioCtx != null) {
+            final src = _audioCtx!.createMediaStreamSource(localWeb);
+            src.connect(_destNode!);
+          }
+        } catch (_) {}
+      }
       // Refresh device list after permissions to reveal full set and labels
       await loadDevices();
       notifyListeners();
@@ -274,6 +317,18 @@ class RtcSession extends ChangeNotifier {
           }
           for (final track in stream2.getTracks()) {
             await _pc?.addTrack(track, stream2);
+          }
+          await _ensureMixStream();
+          await _maybeAddStreamToMix(_localStream);
+          // Connect local audio to web recorder destination if active (retry)
+          if (kIsWeb && _destNode != null) {
+            try {
+              final localWeb2 = _asWebMediaStream(_localStream);
+              if (localWeb2 != null && _audioCtx != null) {
+                final src2 = _audioCtx!.createMediaStreamSource(localWeb2);
+                src2.connect(_destNode!);
+              }
+            } catch (_) {}
           }
           await loadDevices();
           notifyListeners();
@@ -769,6 +824,9 @@ class RtcSession extends ChangeNotifier {
   Future<void> hangup() async {
     try {
       _log('Hangup: closing signaling and peer connection');
+      // Stop recording and finalize
+      await stopRecordingWebAndUpload();
+      await _stopRecorder();
       await _sig?.close();
       await _pc?.close();
       try {
@@ -867,6 +925,199 @@ class RtcSession extends ChangeNotifier {
     // Re-enumerate devices after switching to ensure menu stays accurate
     await loadDevices();
     notifyListeners();
+  }
+
+  // Ensure we maintain a mixed stream containing all audio tracks
+  Future<void> _ensureMixStream() async {
+    _mixStream ??= await createLocalMediaStream('mix');
+  }
+
+  Future<void> _maybeAddStreamToMix(MediaStream? stream) async {
+    if (stream == null) return;
+    await _ensureMixStream();
+    final audioTracks = stream.getAudioTracks();
+    for (final t in audioTracks) {
+      final exists = _mixStream!.getTracks().any((mt) => mt.id == t.id);
+      if (!exists) {
+        try {
+          await _mixStream!.addTrack(t);
+          _log('Mix: added audio track id=${t.id}');
+        } catch (e) {
+          _log('Mix add track error: $e');
+        }
+      }
+    }
+  }
+
+  // --- Web Recording (Chrome, Mobile Safari compatible path) ---
+  // Convert flutter_webrtc MediaStream to web.MediaStream when on web
+  web.MediaStream? _asWebMediaStream(MediaStream? s) {
+    if (!kIsWeb) return null;
+    if (s == null) return null;
+    // Try common properties used by flutter_webrtc web bindings
+    final jsStream = js_util.getProperty(s, 'jsStream');
+    if (jsStream is web.MediaStream) return jsStream;
+    final alt = js_util.getProperty(s, 'stream');
+    if (alt is web.MediaStream) return alt;
+    // Some versions attach directly a JS object
+    if (s is dynamic) {
+      try {
+        final direct = s as web.MediaStream; // may throw
+        return direct;
+      } catch (_) {}
+    }
+    return null;
+  }
+
+  Future<void> startRecordingWeb({Uri? uploadUrl, Map<String, String>? metadata}) async {
+    if (!kIsWeb) return; // web-only path
+    if (isRecording) return;
+    try {
+      recordUploadUrl = uploadUrl ?? recordUploadUrl;
+      _audioCtx ??= web.AudioContext();
+      _destNode = _audioCtx!.createMediaStreamDestination();
+
+      // Connect local audio
+      final localWeb = _asWebMediaStream(_localStream);
+      if (localWeb != null) {
+        final localSrc = _audioCtx!.createMediaStreamSource(localWeb);
+        localSrc.connect(_destNode!);
+      }
+      // Connect remote audio
+      final remoteWeb = _asWebMediaStream(_remoteStream ?? remoteRenderer.srcObject);
+      if (remoteWeb != null) {
+        final remoteSrc = _audioCtx!.createMediaStreamSource(remoteWeb);
+        remoteSrc.connect(_destNode!);
+      }
+
+      // Create MediaRecorder on mixed stream
+      // Prefer Opus in WebM for broad support
+      final supportedType = 'audio/webm;codecs=opus';
+      if (web.MediaRecorder.isTypeSupported(supportedType)) {
+        _webRecorder = web.MediaRecorder(_destNode!.stream, web.MediaRecorderOptions(mimeType: supportedType));
+      } else {
+        _webRecorder = web.MediaRecorder(_destNode!.stream);
+      }
+
+      _webRecorder!.addEventListener('dataavailable', ((web.Event e) {
+        try {
+          final be = e as web.BlobEvent;
+          _lastBlob = be.data;
+        } catch (_) {}
+      }).toJS);
+      _webRecorder!.addEventListener('start', ((web.Event _) {
+        isRecording = true;
+      }).toJS);
+      _webRecorder!.addEventListener('stop', ((web.Event _) {
+        isRecording = false;
+      }).toJS);
+
+      // Start without timeslice to get a single full-session blob on stop
+      _webRecorder!.start();
+    } catch (e) {
+      // Silent error handling for background recording
+      isRecording = false;
+    }
+  }
+
+  Future<void> stopRecordingWebAndUpload({Map<String, String>? metadata}) async {
+    if (!kIsWeb) return;
+    if (_webRecorder == null) return;
+    try {
+      _webRecorder!.stop();
+      // Give a short delay for final dataavailable
+      await Future.delayed(const Duration(milliseconds: 300));
+
+      // Assemble final blob
+      if (_lastBlob == null) {
+        return;
+      }
+      final blob = _lastBlob!;
+      final ts = DateTime.now().toIso8601String().replaceAll(':', '-');
+      final room = _roomName ?? 'call';
+      final filename = 'recording_${room}_$ts.webm';
+
+      // Upload to server if configured
+      if (recordUploadUrl != null) {
+        uploadInProgress = true;
+        uploadProgress = 0.0;
+
+        final form = web.FormData();
+        form.append('file', blob, filename);
+        form.append('room', room.toJS);
+        form.append('timestamp', ts.toJS);
+        if (metadata != null) {
+          for (final entry in metadata.entries) {
+            form.append(entry.key, (entry.value).toJS);
+          }
+        }
+
+        final xhr = web.XMLHttpRequest();
+        xhr.open('POST', recordUploadUrl!.toString());
+        final completer = Completer<void>();
+        xhr.upload.addEventListener('progress', ((web.Event e) {
+          try {
+            final prog = e as web.ProgressEvent;
+            if (prog.lengthComputable) {
+              final loaded = prog.loaded ?? 0;
+              final total = prog.total ?? 1;
+              uploadProgress = total > 0 ? loaded / total : 0.0;
+            }
+          } catch (_) {}
+        }).toJS);
+        xhr.addEventListener('readystatechange', ((web.Event _) {
+          if (xhr.readyState == web.XMLHttpRequest.DONE) {
+            if (!completer.isCompleted) completer.complete();
+          }
+        }).toJS);
+        xhr.addEventListener('error', ((web.Event _) {
+          uploadInProgress = false;
+          if (!completer.isCompleted) completer.complete();
+        }).toJS);
+        xhr.send(form);
+        await completer.future;
+        uploadInProgress = false;
+        uploadProgress = 1.0;
+      } else {
+        // No upload URL configured; silently finish
+      }
+    } catch (e) {
+      // Silent error handling
+      uploadInProgress = false;
+    }
+  }
+
+  Future<void> _startRecorderIfReady() async {
+    if (_recorder != null) return;
+    if (_mixStream == null || _mixStream!.getAudioTracks().isEmpty) return;
+    try {
+      _recorder = MediaRecorder();
+      final ts = DateTime.now().toIso8601String().replaceAll(':', '-');
+      final room = _roomName ?? 'call';
+      final fileName = 'recording_${room}_$ts.mp4';
+      await _recorder!.start(fileName);
+      _log('Recorder started (file=$fileName)');
+    } catch (e) {
+      _log('Recorder start error: $e');
+      _recorder = null;
+    }
+  }
+
+  Future<void> _stopRecorder() async {
+    try {
+      if (_recorder != null) {
+        await _recorder!.stop();
+        _log('Recorder stopped');
+      }
+    } catch (e) {
+      _log('Recorder stop error: $e');
+    } finally {
+      _recorder = null;
+      try {
+        await _mixStream?.dispose();
+      } catch (_) {}
+      _mixStream = null;
+    }
   }
 
   String _preferH264(String sdp) {

