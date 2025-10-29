@@ -114,8 +114,15 @@ class _RoomPageState extends State<RoomPage> {
                     onEnter: (_) => _showUi(),
                     child: GestureDetector(
                       behavior: HitTestBehavior.translucent,
-                      onTap: _showUi,
-                      onPanDown: (_) => _showUi(),
+                      onTap: () {
+                        _showUi();
+                        // Attempt to resume WebAudio on first user gesture so recorder captures audio
+                        _session.resumeWebAudioIfNeeded();
+                      },
+                      onPanDown: (_) {
+                        _showUi();
+                        _session.resumeWebAudioIfNeeded();
+                      },
                       child: _buildVideoArea(),
                     ),
                   ),

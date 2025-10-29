@@ -67,6 +67,27 @@ class RtcSession extends ChangeNotifier {
     print(msg);
   }
 
+  // Attempt to resume the WebAudio context if it is suspended (requires a user gesture on some browsers)
+  void resumeWebAudioIfNeeded() {
+    if (!kIsWeb) return;
+    try {
+      if (_audioCtx != null) {
+        final state = _audioCtx!.state;
+        _log('AudioContext state before resume: $state');
+        // On Chrome/Safari, state is 'suspended' until resumed after a user gesture
+        if (state == 'suspended') {
+          _audioCtx!.resume();
+          // Re-check shortly after attempting resume
+          Future.delayed(const Duration(milliseconds: 100), () {
+            try {
+              _log('AudioContext state after resume: ${_audioCtx!.state}');
+            } catch (_) {}
+          });
+        }
+      }
+    } catch (_) {}
+  }
+
   Future<void> init() async {
     await localRenderer.initialize();
     await remoteRenderer.initialize();
@@ -165,6 +186,8 @@ class RtcSession extends ChangeNotifier {
             if (remoteWeb != null && _audioCtx != null) {
               final src = _audioCtx!.createMediaStreamSource(remoteWeb);
               src.connect(_destNode!);
+              // Ensure audio context is running so recorder receives audio
+              resumeWebAudioIfNeeded();
             }
           } catch (_) {}
         }
@@ -273,11 +296,15 @@ class RtcSession extends ChangeNotifier {
           if (localWeb != null && _audioCtx != null) {
             final src = _audioCtx!.createMediaStreamSource(localWeb);
             src.connect(_destNode!);
+            // Ensure audio context is running so recorder receives audio
+            resumeWebAudioIfNeeded();
           }
         } catch (_) {}
       }
       // Refresh device list after permissions to reveal full set and labels
       await loadDevices();
+      // Try resuming WebAudio after user granted media permissions
+      resumeWebAudioIfNeeded();
       notifyListeners();
     } catch (e) {
       // Capture error for UI surfaces; common causes: permission denied, insecure context
@@ -976,6 +1003,9 @@ class RtcSession extends ChangeNotifier {
       recordUploadUrl = uploadUrl ?? recordUploadUrl;
       _audioCtx ??= web.AudioContext();
       _destNode = _audioCtx!.createMediaStreamDestination();
+      _log('Starting web recorder; AudioContext initial state: ${_audioCtx!.state}');
+      // Attempt to resume immediately; if browser requires a gesture, this is a no-op until we call again after a tap
+      resumeWebAudioIfNeeded();
 
       // Connect local audio
       final localWeb = _asWebMediaStream(_localStream);
@@ -1003,13 +1033,18 @@ class RtcSession extends ChangeNotifier {
         try {
           final be = e as web.BlobEvent;
           _lastBlob = be.data;
+          // Log chunk size to aid debugging of empty recordings
+          final size = js_util.getProperty(be.data, 'size');
+          _log('MediaRecorder dataavailable: blob size=$size bytes');
         } catch (_) {}
       }).toJS);
       _webRecorder!.addEventListener('start', ((web.Event _) {
         isRecording = true;
+        _log('MediaRecorder started');
       }).toJS);
       _webRecorder!.addEventListener('stop', ((web.Event _) {
         isRecording = false;
+        _log('MediaRecorder stopped');
       }).toJS);
 
       // Start without timeslice to get a single full-session blob on stop
