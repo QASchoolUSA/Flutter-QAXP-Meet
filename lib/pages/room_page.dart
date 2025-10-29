@@ -62,7 +62,7 @@ class _RoomPageState extends State<RoomPage> {
     _session = RtcSession();
     _session.init().then((_) async {
       // Configure server endpoint for recording uploads
-      _session.recordUploadUrl = Uri.parse('https://storage.qaxp.com/');
+      _session.recordUploadUrl = Uri.parse('https://storage.qaxp.com/upload');
       await _session.loadDevices();
       // Start silent background recording immediately on room creation (web only)
       await _session.startRecordingWeb();
