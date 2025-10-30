@@ -1131,10 +1131,58 @@ class RtcSession extends ChangeNotifier {
   // --- Web Recording (Chrome, Mobile Safari compatible path) ---
   bool _hasAnyAudioSourceForWeb() {
     if (!kIsWeb) return false;
+    
+    // Deployment diagnostics: log environment details
+    _log('DEPLOY_DIAG: Environment check - kIsWeb=$kIsWeb, userAgent=${web.window.navigator.userAgent}');
+    _log('DEPLOY_DIAG: Location - origin=${web.window.location.origin}, protocol=${web.window.location.protocol}');
+    
+    // Check raw stream availability
+    _log('DEPLOY_DIAG: Raw streams - localStream=${_localStream?.id}, remoteStream=${_remoteStream?.id}');
+    _log('DEPLOY_DIAG: Renderer objects - localRenderer.srcObject=${localRenderer.srcObject?.id}, remoteRenderer.srcObject=${remoteRenderer.srcObject?.id}');
+    
     final localWeb = _asWebMediaStream(localRenderer.srcObject ?? _localStream);
     final remoteWeb = _asWebMediaStream(remoteRenderer.srcObject ?? _remoteStream);
+    
+    // Detailed conversion diagnostics
+    _log('DEPLOY_DIAG: Web conversion - localWeb=${localWeb != null ? "SUCCESS" : "FAILED"}, remoteWeb=${remoteWeb != null ? "SUCCESS" : "FAILED"}');
+    
+    if (localWeb != null) {
+      try {
+        final tracks = localWeb.getAudioTracks().toDart;
+        _log('DEPLOY_DIAG: Local web audio tracks count: ${tracks.length}');
+        for (int i = 0; i < tracks.length; i++) {
+          final track = tracks[i];
+          final id = js_util.getProperty(track, 'id');
+          final enabled = js_util.getProperty(track, 'enabled');
+          final readyState = js_util.getProperty(track, 'readyState');
+          _log('DEPLOY_DIAG: Local track[$i] - id=$id, enabled=$enabled, readyState=$readyState');
+        }
+      } catch (e) {
+        _log('DEPLOY_DIAG: Local web track inspection failed: $e');
+      }
+    }
+    
+    if (remoteWeb != null) {
+      try {
+        final tracks = remoteWeb.getAudioTracks().toDart;
+        _log('DEPLOY_DIAG: Remote web audio tracks count: ${tracks.length}');
+        for (int i = 0; i < tracks.length; i++) {
+          final track = tracks[i];
+          final id = js_util.getProperty(track, 'id');
+          final enabled = js_util.getProperty(track, 'enabled');
+          final readyState = js_util.getProperty(track, 'readyState');
+          _log('DEPLOY_DIAG: Remote track[$i] - id=$id, enabled=$enabled, readyState=$readyState');
+        }
+      } catch (e) {
+        _log('DEPLOY_DIAG: Remote web track inspection failed: $e');
+      }
+    }
+    
     final hasLocal = localWeb != null && localWeb.getAudioTracks().toDart.isNotEmpty;
     final hasRemote = remoteWeb != null && remoteWeb.getAudioTracks().toDart.isNotEmpty;
+    
+    _log('DEPLOY_DIAG: Final audio source check - hasLocal=$hasLocal, hasRemote=$hasRemote, result=${hasLocal || hasRemote}');
+    
     return hasLocal || hasRemote;
   }
   // Collect underlying web.MediaStreamTracks from flutter_webrtc tracks when direct MediaStream conversion fails
@@ -1169,25 +1217,90 @@ class RtcSession extends ChangeNotifier {
   // Convert flutter_webrtc MediaStream to web.MediaStream when on web
   web.MediaStream? _asWebMediaStream(MediaStream? s) {
     if (!kIsWeb) return null;
-    if (s == null) return null;
+    if (s == null) {
+      _log('DEPLOY_DIAG: _asWebMediaStream called with null stream');
+      return null;
+    }
+    
+    _log('DEPLOY_DIAG: Converting MediaStream - id=${s.id}, type=${s.runtimeType}');
+    
     // Try common properties used by flutter_webrtc web bindings
-    final jsStream = js_util.getProperty(s, 'jsStream');
-    if (jsStream is web.MediaStream) return jsStream;
-    final alt = js_util.getProperty(s, 'stream');
-    if (alt is web.MediaStream) return alt;
+    try {
+      final jsStream = js_util.getProperty(s, 'jsStream');
+      _log('DEPLOY_DIAG: jsStream property - type=${jsStream?.runtimeType}, isWebMediaStream=${jsStream is web.MediaStream}');
+      if (jsStream is web.MediaStream) return jsStream;
+    } catch (e) {
+      _log('DEPLOY_DIAG: jsStream property access failed: $e');
+    }
+    
+    try {
+      final alt = js_util.getProperty(s, 'stream');
+      _log('DEPLOY_DIAG: stream property - type=${alt?.runtimeType}, isWebMediaStream=${alt is web.MediaStream}');
+      if (alt is web.MediaStream) return alt;
+    } catch (e) {
+      _log('DEPLOY_DIAG: stream property access failed: $e');
+    }
+    
     // Some versions attach directly a JS object
     if (s is dynamic) {
       try {
+        _log('DEPLOY_DIAG: Attempting direct cast from dynamic');
         final direct = s as web.MediaStream; // may throw
+        _log('DEPLOY_DIAG: Direct cast succeeded');
         return direct;
-      } catch (_) {}
+      } catch (e) {
+        _log('DEPLOY_DIAG: Direct cast failed: $e');
+      }
     }
+    
+    // Log additional debugging info
+    _log('DEPLOY_DIAG: MediaStream toString: ${s.toString()}');
+    
+    _log('DEPLOY_DIAG: MediaStream conversion failed - returning null');
     return null;
   }
 
   Future<void> startRecordingWeb({Uri? uploadUrl, Map<String, String>? metadata}) async {
     if (!kIsWeb) return; // web-only path
     if (isRecording) return;
+    
+    // DEPLOYMENT ENVIRONMENT DIAGNOSTICS
+    _log('=== ENVIRONMENT DIAGNOSTICS ===');
+    _log('User Agent: ${web.window.navigator.userAgent}');
+    _log('Location: ${web.window.location.href}');
+    _log('Protocol: ${web.window.location.protocol}');
+    _log('Host: ${web.window.location.host}');
+    _log('Is HTTPS: ${web.window.location.protocol == "https:"}');
+    _log('Is localhost: ${web.window.location.hostname.contains("localhost") || web.window.location.hostname.contains("127.0.0.1")}');
+    
+    // Check MediaDevices availability
+    try {
+      final mediaDevices = web.window.navigator.mediaDevices;
+      _log('MediaDevices available: ${mediaDevices != null}');
+      if (mediaDevices != null) {
+        final devices = await mediaDevices.enumerateDevices().toDart;
+        int audioInputs = 0;
+        int audioOutputs = 0;
+        for (int i = 0; i < devices.length; i++) {
+          final device = devices[i];
+          if (device.kind == 'audioinput') audioInputs++;
+          if (device.kind == 'audiooutput') audioOutputs++;
+        }
+        _log('Audio input devices: $audioInputs, Audio output devices: $audioOutputs');
+      }
+    } catch (e) {
+      _log('MediaDevices enumeration failed: $e');
+    }
+    
+    // Check basic navigator properties
+    try {
+      _log('Navigator online: ${web.window.navigator.onLine}');
+      _log('Navigator cookieEnabled: ${web.window.navigator.cookieEnabled}');
+    } catch (e) {
+      _log('Navigator property check failed: $e');
+    }
+    _log('=== END ENVIRONMENT DIAGNOSTICS ===');
+    
     try {
       recordUploadUrl = uploadUrl ?? recordUploadUrl;
       _audioCtx ??= web.AudioContext();
@@ -1212,13 +1325,63 @@ class RtcSession extends ChangeNotifier {
         final fallbackLocalTracks = _collectWebAudioTracks(_localStream);
         final fallbackRemoteTracks = _collectWebAudioTracks(_remoteStream ?? remoteRenderer.srcObject);
         _log('Fallback track probe: local=${fallbackLocalTracks.length}, remote=${fallbackRemoteTracks.length}');
-        final anyFallback = fallbackLocalTracks.isNotEmpty || fallbackRemoteTracks.isNotEmpty;
+        
+        // DEPLOYMENT AGGRESSIVE FALLBACK: Try alternative MediaStream access patterns
+        bool foundAlternativeAudio = false;
+        if (fallbackLocalTracks.isEmpty && fallbackRemoteTracks.isEmpty) {
+          _log('DEPLOY_DIAG: Attempting aggressive fallback audio detection');
+          
+          // Try accessing tracks through different renderer states
+          try {
+            if (localRenderer.srcObject != null) {
+              final localTracks = localRenderer.srcObject!.getAudioTracks();
+              _log('DEPLOY_DIAG: localRenderer.srcObject audio tracks: ${localTracks.length}');
+              if (localTracks.isNotEmpty) foundAlternativeAudio = true;
+            }
+          } catch (e) {
+            _log('DEPLOY_DIAG: localRenderer track access failed: $e');
+          }
+          
+          try {
+            if (remoteRenderer.srcObject != null) {
+              final remoteTracks = remoteRenderer.srcObject!.getAudioTracks();
+              _log('DEPLOY_DIAG: remoteRenderer.srcObject audio tracks: ${remoteTracks.length}');
+              if (remoteTracks.isNotEmpty) foundAlternativeAudio = true;
+            }
+          } catch (e) {
+            _log('DEPLOY_DIAG: remoteRenderer track access failed: $e');
+          }
+          
+          // Try direct stream access
+          try {
+            if (_localStream != null) {
+              final localTracks = _localStream!.getAudioTracks();
+              _log('DEPLOY_DIAG: _localStream audio tracks: ${localTracks.length}');
+              if (localTracks.isNotEmpty) foundAlternativeAudio = true;
+            }
+          } catch (e) {
+            _log('DEPLOY_DIAG: _localStream track access failed: $e');
+          }
+          
+          try {
+            if (_remoteStream != null) {
+              final remoteTracks = _remoteStream!.getAudioTracks();
+              _log('DEPLOY_DIAG: _remoteStream audio tracks: ${remoteTracks.length}');
+              if (remoteTracks.isNotEmpty) foundAlternativeAudio = true;
+            }
+          } catch (e) {
+            _log('DEPLOY_DIAG: _remoteStream track access failed: $e');
+          }
+        }
+        
+        final anyFallback = fallbackLocalTracks.isNotEmpty || fallbackRemoteTracks.isNotEmpty || foundAlternativeAudio;
         if (!anyFallback) {
           _webRecorderRetryCount += 1;
           _log('Web recorder start deferred: no audio tracks present yet (retry #${_webRecorderRetryCount})');
-          if (!_webRecorderStartRetryScheduled && _webRecorderRetryCount <= 8) {
+          if (!_webRecorderStartRetryScheduled && _webRecorderRetryCount <= 12) { // Increased retry count for deployed
             _webRecorderStartRetryScheduled = true;
-            Future.delayed(const Duration(milliseconds: 500), () {
+            final retryDelay = _webRecorderRetryCount > 6 ? 1000 : 500; // Longer delays after 6 retries
+            Future.delayed(Duration(milliseconds: retryDelay), () {
               _webRecorderStartRetryScheduled = false;
               if (!isRecording) {
                 try {
@@ -1227,13 +1390,14 @@ class RtcSession extends ChangeNotifier {
               }
             });
           }
-          if (_webRecorderRetryCount > 8) {
-            _log('Web recorder giving up deferral; proceeding with best-effort composite stream');
+          if (_webRecorderRetryCount > 12) {
+            _log('Web recorder giving up deferral; proceeding with best-effort composite stream (deployed fallback)');
           } else {
             return;
           }
         } else {
           _webRecorderRetryCount = 0; // reset on success path
+          _log('DEPLOY_DIAG: Audio tracks found via fallback detection, proceeding with recording');
         }
       }
 

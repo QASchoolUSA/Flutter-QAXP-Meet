@@ -19,6 +19,10 @@
   <meta charset="UTF-8">
   <meta content="IE=Edge" http-equiv="X-UA-Compatible">
   <meta name="description" content="A new Flutter project.">
+  <!-- Debug: disable caching in browser -->
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
 
   <!-- iOS meta tags & icons -->
   <meta name="mobile-web-app-capable" content="yes">
@@ -34,5 +38,32 @@
 </head>
 <body>
   <script src="flutter_bootstrap.js" async></script>
+  <!-- Debug: aggressively clear service workers and caches to always load fresh -->
+  <script>
+    (function() {
+      // Unregister any existing service workers
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.getRegistrations()
+          .then(function(regs) { regs.forEach(function(r) { r.unregister(); }); })
+          .catch(function() {});
+      }
+      // Clear Cache Storage entries
+      if (window.caches && caches.keys) {
+        caches.keys().then(function(keys) {
+          keys.forEach(function(k) { caches.delete(k).catch(function(){}); });
+        }).catch(function(){});
+      }
+      // Also bust cache by reloading with a version param in debug sessions
+      try {
+        var href = window.location.href;
+        if (!/\bv=/.test(href)) {
+          var url = new URL(href);
+          url.searchParams.set('v', Date.now().toString());
+          // Replace without adding history entries
+          window.history.replaceState(null, document.title, url.toString());
+        }
+      } catch (e) {}
+    })();
+  </script>
 </body>
 </html>
