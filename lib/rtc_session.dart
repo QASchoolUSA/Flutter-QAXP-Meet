@@ -55,6 +55,7 @@ class RtcSession extends ChangeNotifier {
   // Fallback composite stream for recording without WebAudio mix
   web.MediaStream? _compositeStream;
   bool isRecording = false;
+  bool _hangupCalled = false; // guard to avoid double-stop/upload
   bool uploadInProgress = false;
   double uploadProgress = 0.0; // 0.0..1.0
   String? recordingStatus; // human-readable state
@@ -906,6 +907,8 @@ class RtcSession extends ChangeNotifier {
   }
 
   Future<void> hangup() async {
+    if (_hangupCalled) return;
+    _hangupCalled = true;
     try {
       _log('Hangup: closing signaling and peer connection');
       // Stop recording and finalize
@@ -1034,6 +1037,14 @@ class RtcSession extends ChangeNotifier {
   }
 
   // --- Web Recording (Chrome, Mobile Safari compatible path) ---
+  bool _hasAnyAudioSourceForWeb() {
+    if (!kIsWeb) return false;
+    final localWeb = _asWebMediaStream(_localStream);
+    final remoteWeb = _asWebMediaStream(_remoteStream ?? remoteRenderer.srcObject);
+    final hasLocal = localWeb != null && localWeb.getAudioTracks().toDart.isNotEmpty;
+    final hasRemote = remoteWeb != null && remoteWeb.getAudioTracks().toDart.isNotEmpty;
+    return hasLocal || hasRemote;
+  }
   // Convert flutter_webrtc MediaStream to web.MediaStream when on web
   web.MediaStream? _asWebMediaStream(MediaStream? s) {
     if (!kIsWeb) return null;
@@ -1066,6 +1077,22 @@ class RtcSession extends ChangeNotifier {
 
       final localWeb = _asWebMediaStream(_localStream);
       final remoteWeb = _asWebMediaStream(_remoteStream ?? remoteRenderer.srcObject);
+
+      // If there are no audio tracks yet, defer starting briefly until media is ready
+      final localHasAudio = localWeb != null && localWeb.getAudioTracks().toDart.isNotEmpty;
+      final remoteHasAudio = remoteWeb != null && remoteWeb.getAudioTracks().toDart.isNotEmpty;
+      if (!localHasAudio && !remoteHasAudio) {
+        _log('Web recorder start deferred: no audio tracks present yet');
+        // Single delayed retry to avoid starting on an empty stream
+        Future.delayed(const Duration(milliseconds: 500), () {
+          if (!isRecording) {
+            try {
+              startRecordingWeb(uploadUrl: uploadUrl, metadata: metadata);
+            } catch (_) {}
+          }
+        });
+        return;
+      }
 
       // Choose source: WebAudio mix when running; else fallback to composite stream of tracks
       final bool audioCtxRunning = _audioCtx!.state == 'running';
