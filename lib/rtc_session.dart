@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:developer' as developer;
+import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:web/web.dart' as web;
@@ -61,6 +62,11 @@ class RtcSession extends ChangeNotifier {
   String? recordingStatus; // human-readable state
   Uri? recordUploadUrl; // set by app for server upload
   bool _webRecorderStartRetryScheduled = false; // throttle deferred starts
+  // Mic level monitoring (web): analyser + periodic sampling
+  web.AnalyserNode? _micAnalyser;
+  web.MediaStreamAudioSourceNode? _micSourceNode;
+  Timer? _micLevelTimer;
+  double micLevel = 0.0; // 0.0..1.0
 
   // lightweight logger to surface messages in release builds and web console
   void _log(String message) {
@@ -89,6 +95,74 @@ class RtcSession extends ChangeNotifier {
           });
         }
       }
+    } catch (_) {}
+  }
+
+  // Query microphone permission state when available (granted/denied/prompt)
+  Future<String?> _getMicrophonePermissionState() async {
+    if (!kIsWeb) return null;
+    try {
+      final perms = js_util.getProperty(web.window.navigator, 'permissions');
+      if (perms != null) {
+        final status = await js_util.promiseToFuture(js_util.callMethod(perms, 'query', [js_util.jsify({'name': 'microphone'})]));
+        final state = js_util.getProperty(status, 'state');
+        return state?.toString();
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  // Start mic level monitoring using WebAudio analyser on local stream
+  void _startMicLevelMonitor() {
+    if (!kIsWeb) return;
+    try {
+      final localWeb = _asWebMediaStream(_localStream);
+      if (localWeb == null) return;
+      _audioCtx ??= web.AudioContext();
+      _micAnalyser = _audioCtx!.createAnalyser();
+      _micAnalyser!.fftSize = 2048;
+      _micSourceNode = _audioCtx!.createMediaStreamSource(localWeb);
+      _micSourceNode!.connect(_micAnalyser!);
+
+      _micLevelTimer?.cancel();
+      _micLevelTimer = Timer.periodic(const Duration(milliseconds: 150), (_) {
+        try {
+          final size = _micAnalyser!.fftSize;
+          final data = js_util.callConstructor(js_util.getProperty(web.window, 'Uint8Array'), [size]);
+          js_util.callMethod(_micAnalyser!, 'getByteTimeDomainData', [data]);
+          final len = js_util.getProperty(data, 'length') as int;
+          double sumSquares = 0.0;
+          for (var i = 0; i < len; i++) {
+            final v = (js_util.getProperty(data, i) as num).toDouble();
+            final centered = (v - 128.0) / 128.0;
+            sumSquares += centered * centered;
+          }
+          final rms = math.sqrt(sumSquares / len);
+          // Clamp and smooth slightly
+          final level = rms.clamp(0.0, 1.0);
+          // Simple smoothing
+          micLevel = (micLevel * 0.7) + (level * 0.3);
+          notifyListeners();
+        } catch (_) {}
+      });
+      resumeWebAudioIfNeeded();
+    } catch (_) {}
+  }
+
+  void _stopMicLevelMonitor() {
+    try {
+      _micLevelTimer?.cancel();
+      _micLevelTimer = null;
+      try {
+        _micSourceNode?.disconnect();
+      } catch (_) {}
+      try {
+        _micAnalyser?.disconnect();
+      } catch (_) {}
+      _micSourceNode = null;
+      _micAnalyser = null;
+      micLevel = 0.0;
+      notifyListeners();
     } catch (_) {}
   }
 
@@ -346,6 +420,13 @@ class RtcSession extends ChangeNotifier {
       await loadDevices();
       // Try resuming WebAudio after user granted media permissions
       resumeWebAudioIfNeeded();
+      // Begin mic level monitor when local audio exists
+      try {
+        final hasAudio = _localStream?.getAudioTracks().isNotEmpty == true;
+        if (hasAudio) {
+          _startMicLevelMonitor();
+        }
+      } catch (_) {}
       notifyListeners();
     } catch (e) {
       // Capture error for UI surfaces; common causes: permission denied, insecure context
@@ -913,6 +994,7 @@ class RtcSession extends ChangeNotifier {
     try {
       _log('Hangup: closing signaling and peer connection');
       // Stop recording and finalize
+      _stopMicLevelMonitor();
       await stopRecordingWebAndUpload();
       await _stopRecorder();
       await _sig?.close();
@@ -959,9 +1041,17 @@ class RtcSession extends ChangeNotifier {
   // Device enumeration and selection
   Future<void> loadDevices() async {
     try {
+      final perm = await _getMicrophonePermissionState();
+      if (perm != null) {
+        _log('Microphone permission state: $perm');
+      }
       final devices = await navigator.mediaDevices.enumerateDevices();
       audioInputs = devices.where((d) => d.kind == 'audioinput').toList();
       videoInputs = devices.where((d) => d.kind == 'videoinput').toList();
+      _log('Enumerated devices: audioInputs=${audioInputs.length} videoInputs=${videoInputs.length}');
+      if (audioInputs.isEmpty) {
+        _log('No audioinput devices detected');
+      }
       selectedAudioInputId ??= audioInputs.isNotEmpty ? audioInputs.first.deviceId : null;
       selectedVideoInputId ??= videoInputs.isNotEmpty ? videoInputs.first.deviceId : null;
       notifyListeners();
@@ -1221,15 +1311,21 @@ class RtcSession extends ChangeNotifier {
     if (!kIsWeb) return;
     if (_webRecorder == null) return;
     try {
+      _log('Stopping web recorder and preparing upload');
       _webRecorder!.stop();
       // Give a short delay for final dataavailable
       await Future.delayed(const Duration(milliseconds: 300));
 
       // Assemble final blob
       if (_lastBlob == null) {
+        _log('No final blob produced by MediaRecorder');
         return;
       }
       final blob = _lastBlob!;
+      try {
+        final size = js_util.getProperty(blob, 'size');
+        _log('Final blob size: $size bytes');
+      } catch (_) {}
       final ts = DateTime.now().toIso8601String().replaceAll(':', '-');
       final room = _roomName ?? 'call';
       final filename = 'recording_${room}_$ts.webm';
@@ -1238,6 +1334,7 @@ class RtcSession extends ChangeNotifier {
       if (recordUploadUrl != null) {
         uploadInProgress = true;
         uploadProgress = 0.0;
+        _log('Uploading to ${recordUploadUrl} as $filename');
 
         final form = web.FormData();
         form.append('file', blob, filename);
@@ -1259,15 +1356,18 @@ class RtcSession extends ChangeNotifier {
               final loaded = prog.loaded ?? 0;
               final total = prog.total ?? 1;
               uploadProgress = total > 0 ? loaded / total : 0.0;
+              _log('Upload progress: ${loaded}/${total} (${(uploadProgress * 100).toStringAsFixed(1)}%)');
             }
           } catch (_) {}
         }).toJS);
         xhr.addEventListener('readystatechange', ((web.Event _) {
           if (xhr.readyState == web.XMLHttpRequest.DONE) {
+            _log('Upload completed: status=${xhr.status}');
             if (!completer.isCompleted) completer.complete();
           }
         }).toJS);
         xhr.addEventListener('error', ((web.Event _) {
+          _log('Upload error occurred');
           uploadInProgress = false;
           if (!completer.isCompleted) completer.complete();
         }).toJS);
@@ -1280,6 +1380,7 @@ class RtcSession extends ChangeNotifier {
       }
     } catch (e) {
       // Silent error handling
+      _log('stopRecordingWebAndUpload error: $e');
       uploadInProgress = false;
     }
   }

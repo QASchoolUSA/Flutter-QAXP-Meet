@@ -11,9 +11,31 @@ class CallControls extends StatelessWidget {
     final s = session ?? RtcSessionProvider.of(context);
     final micIcon = s.micEnabled ? Icons.mic : Icons.mic_off;
     final videoIcon = s.videoEnabled ? Icons.videocam : Icons.videocam_off;
-    return Row(
+    return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
+        // Status message: recording/uploading/error
+        if (s.mediaError != null)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Text(
+              'Mic error: ${s.mediaError}',
+              style: const TextStyle(color: Colors.redAccent, fontSize: 12),
+            ),
+          )
+        else
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Text(
+              s.uploadInProgress
+                  ? 'Uploading ${(s.uploadProgress * 100).toStringAsFixed(0)}%'
+                  : (s.isRecording ? 'Recording' : 'Ready'),
+              style: const TextStyle(color: Colors.white70, fontSize: 12),
+            ),
+          ),
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
         ElevatedButton(
           onPressed: s.toggleMic,
           style: ButtonStyle(
@@ -29,6 +51,34 @@ class CallControls extends StatelessWidget {
           child: Icon(micIcon),
         ),
         const SizedBox(width: 12),
+        // Mic level bar
+        SizedBox(
+          width: 80,
+          height: 8,
+          child: Stack(
+            children: [
+              Container(
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(4),
+                ),
+              ),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Container(
+                  width: (s.micLevel.clamp(0.0, 1.0) * 80).toDouble(),
+                  height: 8,
+                  decoration: BoxDecoration(
+                    color: s.micLevel > 0.6
+                        ? Colors.greenAccent
+                        : (s.micLevel > 0.2 ? Colors.lightGreen : Colors.green.withValues(alpha: 0.6)),
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
         const SizedBox(width: 12),
         ElevatedButton(
           onPressed: s.toggleVideo,
@@ -59,6 +109,8 @@ class CallControls extends StatelessWidget {
             foregroundColor: WidgetStateProperty.all(Colors.white),
           ),
           child: const Icon(Icons.call_end),
+        ),
+          ],
         ),
       ],
     );
