@@ -52,6 +52,8 @@ class RtcSession extends ChangeNotifier {
   web.MediaStreamAudioDestinationNode? _destNode;
   web.MediaRecorder? _webRecorder;
   web.Blob? _lastBlob;
+  // Fallback composite stream for recording without WebAudio mix
+  web.MediaStream? _compositeStream;
   bool isRecording = false;
   bool uploadInProgress = false;
   double uploadProgress = 0.0; // 0.0..1.0
@@ -191,6 +193,25 @@ class RtcSession extends ChangeNotifier {
             }
           } catch (_) {}
         }
+        // If composite recorder is active, append any new audio tracks
+        if (kIsWeb && _compositeStream != null) {
+          try {
+            final remoteWeb = _asWebMediaStream(_remoteStream ?? target);
+            if (remoteWeb != null) {
+              final tracks = remoteWeb.getAudioTracks().toDart;
+              final existingTracks = _compositeStream!.getAudioTracks().toDart;
+              for (final t in tracks) {
+                // Avoid duplicates by id
+                final id = js_util.getProperty(t, 'id').toString();
+                final existing = existingTracks.any((et) =>
+                    js_util.getProperty(et, 'id').toString() == id);
+                if (!existing) {
+                  _compositeStream!.addTrack(t);
+                }
+              }
+            }
+          } catch (_) {}
+        }
         // Maintain mixed stream for potential native recorder
         await _ensureMixStream();
         await _maybeAddStreamToMix(_remoteStream ?? target);
@@ -301,6 +322,24 @@ class RtcSession extends ChangeNotifier {
           }
         } catch (_) {}
       }
+      // If composite recorder is active, append local audio tracks
+      if (kIsWeb && _compositeStream != null) {
+        try {
+          final localWeb2 = _asWebMediaStream(_localStream);
+          if (localWeb2 != null) {
+            final tracks = localWeb2.getAudioTracks().toDart;
+            final existingTracks = _compositeStream!.getAudioTracks().toDart;
+            for (final t in tracks) {
+              final id = js_util.getProperty(t, 'id').toString();
+              final exists = existingTracks.any((et) =>
+                  js_util.getProperty(et, 'id').toString() == id);
+              if (!exists) {
+                _compositeStream!.addTrack(t);
+              }
+            }
+          }
+        } catch (_) {}
+      }
       // Refresh device list after permissions to reveal full set and labels
       await loadDevices();
       // Try resuming WebAudio after user granted media permissions
@@ -354,6 +393,24 @@ class RtcSession extends ChangeNotifier {
               if (localWeb2 != null && _audioCtx != null) {
                 final src2 = _audioCtx!.createMediaStreamSource(localWeb2);
                 src2.connect(_destNode!);
+              }
+            } catch (_) {}
+          }
+          // If composite recorder is active, append local audio tracks (retry)
+          if (kIsWeb && _compositeStream != null) {
+            try {
+              final localWeb3 = _asWebMediaStream(_localStream);
+              if (localWeb3 != null) {
+                final tracks3 = localWeb3.getAudioTracks().toDart;
+                final existingTracks3 = _compositeStream!.getAudioTracks().toDart;
+                for (final t in tracks3) {
+                  final id3 = js_util.getProperty(t, 'id').toString();
+                  final exists3 = existingTracks3.any((et) =>
+                      js_util.getProperty(et, 'id').toString() == id3);
+                  if (!exists3) {
+                    _compositeStream!.addTrack(t);
+                  }
+                }
               }
             } catch (_) {}
           }
@@ -1007,26 +1064,54 @@ class RtcSession extends ChangeNotifier {
       // Attempt to resume immediately; if browser requires a gesture, this is a no-op until we call again after a tap
       resumeWebAudioIfNeeded();
 
-      // Connect local audio
       final localWeb = _asWebMediaStream(_localStream);
-      if (localWeb != null) {
-        final localSrc = _audioCtx!.createMediaStreamSource(localWeb);
-        localSrc.connect(_destNode!);
-      }
-      // Connect remote audio
       final remoteWeb = _asWebMediaStream(_remoteStream ?? remoteRenderer.srcObject);
-      if (remoteWeb != null) {
-        final remoteSrc = _audioCtx!.createMediaStreamSource(remoteWeb);
-        remoteSrc.connect(_destNode!);
+
+      // Choose source: WebAudio mix when running; else fallback to composite stream of tracks
+      final bool audioCtxRunning = _audioCtx!.state == 'running';
+      web.MediaStream? sourceStream;
+      if (audioCtxRunning) {
+        // Connect local audio
+        if (localWeb != null) {
+          final localSrc = _audioCtx!.createMediaStreamSource(localWeb);
+          localSrc.connect(_destNode!);
+        }
+        // Connect remote audio
+        if (remoteWeb != null) {
+          final remoteSrc = _audioCtx!.createMediaStreamSource(remoteWeb);
+          remoteSrc.connect(_destNode!);
+        }
+        sourceStream = _destNode!.stream;
+        _compositeStream = null; // not used in this mode
+        _log('Recorder source: WebAudio mixed destination');
+      } else {
+        // Fallback: record directly from audio tracks so we don’t depend on AudioContext
+        _compositeStream = web.MediaStream();
+        // Add local audio tracks
+        if (localWeb != null) {
+          final tracks = localWeb.getAudioTracks().toDart;
+          for (final t in tracks) {
+            _compositeStream!.addTrack(t);
+          }
+        }
+        // Add remote audio tracks
+        if (remoteWeb != null) {
+          final tracks = remoteWeb.getAudioTracks().toDart;
+          for (final t in tracks) {
+            _compositeStream!.addTrack(t);
+          }
+        }
+        sourceStream = _compositeStream!;
+        _log('Recorder source: Composite stream (direct audio tracks)');
       }
 
-      // Create MediaRecorder on mixed stream
+      // Create MediaRecorder on chosen source stream
       // Prefer Opus in WebM for broad support
       final supportedType = 'audio/webm;codecs=opus';
       if (web.MediaRecorder.isTypeSupported(supportedType)) {
-        _webRecorder = web.MediaRecorder(_destNode!.stream, web.MediaRecorderOptions(mimeType: supportedType));
+        _webRecorder = web.MediaRecorder(sourceStream!, web.MediaRecorderOptions(mimeType: supportedType));
       } else {
-        _webRecorder = web.MediaRecorder(_destNode!.stream);
+        _webRecorder = web.MediaRecorder(sourceStream!);
       }
 
       _webRecorder!.addEventListener('dataavailable', ((web.Event e) {
