@@ -61,8 +61,54 @@ class RtcSession extends ChangeNotifier {
   double uploadProgress = 0.0; // 0.0..1.0
   String? recordingStatus; // human-readable state
   Uri? recordUploadUrl; // set by app for server upload
+  bool _uploadStarted = false; // guard to prevent duplicate uploads
   bool _webRecorderStartRetryScheduled = false; // throttle deferred starts
   int _webRecorderRetryCount = 0; // retry attempts when audio tracks not yet present
+  String? _webMimeType; // chosen mime type for MediaRecorder
+  String _fileExt = 'webm'; // file extension based on mime
+
+  // Choose best audio MIME and extension for current browser
+  Map<String, String> _chooseBestAudioMime() {
+    if (!kIsWeb) return {'type': 'audio/webm;codecs=opus', 'ext': 'webm'};
+    final ua = web.window.navigator.userAgent.toLowerCase();
+    // Order candidates by browser
+    List<Map<String, String>> candidates;
+    if (ua.contains('safari') && !ua.contains('chrome')) {
+      // Safari prefers AAC in MP4 (m4a)
+      candidates = [
+        {'type': 'audio/mp4;codecs=mp4a.40.2', 'ext': 'm4a'},
+        {'type': 'audio/mp4', 'ext': 'm4a'},
+        {'type': 'audio/webm;codecs=opus', 'ext': 'webm'},
+        {'type': 'audio/webm', 'ext': 'webm'},
+        {'type': 'audio/ogg;codecs=opus', 'ext': 'ogg'},
+      ];
+    } else if (ua.contains('firefox')) {
+      // Firefox prefers OGG Opus, then WebM
+      candidates = [
+        {'type': 'audio/ogg;codecs=opus', 'ext': 'ogg'},
+        {'type': 'audio/webm;codecs=opus', 'ext': 'webm'},
+        {'type': 'audio/webm', 'ext': 'webm'},
+        {'type': 'audio/mp4;codecs=mp4a.40.2', 'ext': 'm4a'},
+        {'type': 'audio/mp4', 'ext': 'm4a'},
+      ];
+    } else {
+      // Chrome/Edge default: WebM Opus
+      candidates = [
+        {'type': 'audio/webm;codecs=opus', 'ext': 'webm'},
+        {'type': 'audio/webm', 'ext': 'webm'},
+        {'type': 'audio/mp4;codecs=mp4a.40.2', 'ext': 'm4a'},
+        {'type': 'audio/mp4', 'ext': 'm4a'},
+        {'type': 'audio/ogg;codecs=opus', 'ext': 'ogg'},
+      ];
+    }
+    for (final c in candidates) {
+      final t = c['type']!;
+      try {
+        if (web.MediaRecorder.isTypeSupported(t)) return c;
+      } catch (_) {}
+    }
+    return {'type': 'audio/webm;codecs=opus', 'ext': 'webm'}; // sensible default
+  }
   // Mic level monitoring (web): analyser + periodic sampling
   web.AnalyserNode? _micAnalyser;
   web.MediaStreamAudioSourceNode? _micSourceNode;
@@ -1453,22 +1499,27 @@ class RtcSession extends ChangeNotifier {
         } catch (_) {}
       }
 
-      // Create MediaRecorder on chosen source stream
-      // Prefer Opus in WebM for broad support
-      final supportedType = 'audio/webm;codecs=opus';
-      if (web.MediaRecorder.isTypeSupported(supportedType)) {
-        _webRecorder = web.MediaRecorder(sourceStream!, web.MediaRecorderOptions(mimeType: supportedType));
+      // Create MediaRecorder on chosen source stream using best audio type
+      final best = _chooseBestAudioMime();
+      _webMimeType = best['type'];
+      _fileExt = best['ext'] ?? 'webm';
+      if (_webMimeType != null) {
+        _log('MediaRecorder MIME: ${_webMimeType}, ext=${_fileExt}');
+        _webRecorder = web.MediaRecorder(sourceStream!, web.MediaRecorderOptions(mimeType: _webMimeType!));
       } else {
+        _log('MediaRecorder MIME: default (browser decides)');
         _webRecorder = web.MediaRecorder(sourceStream!);
       }
 
       _webRecorder!.addEventListener('dataavailable', ((web.Event e) {
         try {
           final be = e as web.BlobEvent;
-          _lastBlob = be.data;
-          // Log chunk size to aid debugging of empty recordings
+          // Accept only non-empty chunks; update lastBlob
           final size = js_util.getProperty(be.data, 'size');
           _log('MediaRecorder dataavailable: blob size=$size bytes');
+          if ((size is num ? size.toInt() : 0) > 0) {
+            _lastBlob = be.data;
+          }
         } catch (_) {}
       }).toJS);
       _webRecorder!.addEventListener('start', ((web.Event _) {
@@ -1480,8 +1531,8 @@ class RtcSession extends ChangeNotifier {
         _log('MediaRecorder stopped');
       }).toJS);
 
-      // Use a timeslice so we can observe periodic dataavailable for diagnostics
-      _webRecorder!.start(1000);
+      // Start without timeslice to produce a single final blob on stop
+      _webRecorder!.start();
     } catch (e) {
       // Silent error handling for background recording
       isRecording = false;
@@ -1491,6 +1542,10 @@ class RtcSession extends ChangeNotifier {
   Future<void> stopRecordingWebAndUpload({Map<String, String>? metadata}) async {
     if (!kIsWeb) return;
     try {
+      if (_uploadStarted) {
+        _log('Upload already started; skipping duplicate stop');
+        return;
+      }
       if (_webRecorder != null) {
         _log('Stopping web recorder and preparing upload');
         _webRecorder!.stop();
@@ -1514,11 +1569,17 @@ class RtcSession extends ChangeNotifier {
             for (final t in collRemote) { sourceStream.addTrack(t); }
           }
           if (sourceStream.getAudioTracks().toDart.isNotEmpty) {
-            final supportedType = 'audio/webm;codecs=opus';
-            final rec = web.MediaRecorder.isTypeSupported(supportedType)
+            // Use same selection as main recorder
+            String? quickMime = _webMimeType;
+            if (quickMime == null) {
+              final bestQuick = _chooseBestAudioMime();
+              quickMime = bestQuick['type'];
+              _fileExt = bestQuick['ext'] ?? _fileExt;
+            }
+            final rec = quickMime != null
                 ? web.MediaRecorder(
                     sourceStream,
-                    web.MediaRecorderOptions(mimeType: supportedType),
+                    web.MediaRecorderOptions(mimeType: quickMime),
                   )
                 : web.MediaRecorder(sourceStream);
             rec.addEventListener('dataavailable', ((web.Event e) {
@@ -1557,9 +1618,15 @@ class RtcSession extends ChangeNotifier {
               _log('Emergency mic capture: MediaStream cast failed: $e');
             }
             if (micStream != null) {
-              final supportedType = 'audio/webm;codecs=opus';
-              final rec = web.MediaRecorder.isTypeSupported(supportedType)
-                  ? web.MediaRecorder(micStream, web.MediaRecorderOptions(mimeType: supportedType))
+              // Use same MIME selection
+              String? emMime = _webMimeType;
+              if (emMime == null) {
+                final bestEm = _chooseBestAudioMime();
+                emMime = bestEm['type'];
+                _fileExt = bestEm['ext'] ?? _fileExt;
+              }
+              final rec = emMime != null
+                  ? web.MediaRecorder(micStream, web.MediaRecorderOptions(mimeType: emMime))
                   : web.MediaRecorder(micStream);
               rec.addEventListener('dataavailable', ((web.Event e) {
                 try {
@@ -1589,13 +1656,18 @@ class RtcSession extends ChangeNotifier {
       try {
         final size = js_util.getProperty(blob, 'size');
         _log('Final blob size: $size bytes');
+        if ((size is num ? size.toInt() : 0) == 0) {
+          _log('Final blob is empty; aborting upload');
+          return;
+        }
       } catch (_) {}
       final ts = DateTime.now().toIso8601String().replaceAll(':', '-');
       final room = _roomName ?? 'call';
-      final filename = 'recording_${room}_$ts.webm';
+      final filename = 'recording_${room}_$ts.${_fileExt}';
 
       // Upload to server if configured
       if (recordUploadUrl != null) {
+        _uploadStarted = true;
         uploadInProgress = true;
         uploadProgress = 0.0;
         _log('Uploading to ${recordUploadUrl} as $filename');

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../rtc_session.dart';
 import '../session_provider.dart';
+import '../main.dart';
 
 class CallControls extends StatelessWidget {
   final RtcSession? session;
@@ -99,7 +100,14 @@ class CallControls extends StatelessWidget {
           onPressed: () async {
             final nav = Navigator.of(context);
             await s.hangup();
-            nav.pop();
+            // Delay slightly to allow UI settle and avoid blank page race
+            await Future.delayed(const Duration(milliseconds: 150));
+            if (nav.canPop()) {
+              nav.pop();
+            } else {
+              // Fallback: return to home explicitly
+              nav.pushReplacement(MaterialPageRoute(builder: (_) => const HomePage()));
+            }
           },
           style: ButtonStyle(
             shape: WidgetStateProperty.all(const CircleBorder()),
