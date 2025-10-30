@@ -116,7 +116,7 @@ class RtcSession extends ChangeNotifier {
   void _startMicLevelMonitor() {
     if (!kIsWeb) return;
     try {
-      final localWeb = _asWebMediaStream(_localStream);
+      final localWeb = _asWebMediaStream(localRenderer.srcObject ?? _localStream);
       if (localWeb == null) return;
       _audioCtx ??= web.AudioContext();
       _micAnalyser = _audioCtx!.createAnalyser();
@@ -260,7 +260,7 @@ class RtcSession extends ChangeNotifier {
         // Connect to web recorder destination if active
         if (kIsWeb && _destNode != null) {
           try {
-            final remoteWeb = _asWebMediaStream(_remoteStream ?? target);
+            final remoteWeb = _asWebMediaStream(remoteRenderer.srcObject ?? _remoteStream ?? target);
             if (remoteWeb != null && _audioCtx != null) {
               final src = _audioCtx!.createMediaStreamSource(remoteWeb);
               src.connect(_destNode!);
@@ -272,7 +272,7 @@ class RtcSession extends ChangeNotifier {
         // If composite recorder is active, append any new audio tracks
         if (kIsWeb && _compositeStream != null) {
           try {
-            final remoteWeb = _asWebMediaStream(_remoteStream ?? target);
+            final remoteWeb = _asWebMediaStream(remoteRenderer.srcObject ?? _remoteStream ?? target);
             if (remoteWeb != null) {
               final tracks = remoteWeb.getAudioTracks().toDart;
               final existingTracks = _compositeStream!.getAudioTracks().toDart;
@@ -389,7 +389,7 @@ class RtcSession extends ChangeNotifier {
       // Connect local audio to web recorder destination if active
       if (kIsWeb && _destNode != null) {
         try {
-          final localWeb = _asWebMediaStream(_localStream);
+          final localWeb = _asWebMediaStream(localRenderer.srcObject ?? _localStream);
           if (localWeb != null && _audioCtx != null) {
             final src = _audioCtx!.createMediaStreamSource(localWeb);
             src.connect(_destNode!);
@@ -401,7 +401,7 @@ class RtcSession extends ChangeNotifier {
       // If composite recorder is active, append local audio tracks
       if (kIsWeb && _compositeStream != null) {
         try {
-          final localWeb2 = _asWebMediaStream(_localStream);
+          final localWeb2 = _asWebMediaStream(localRenderer.srcObject ?? _localStream);
           if (localWeb2 != null) {
             final tracks = localWeb2.getAudioTracks().toDart;
             final existingTracks = _compositeStream!.getAudioTracks().toDart;
@@ -472,7 +472,7 @@ class RtcSession extends ChangeNotifier {
           // Connect local audio to web recorder destination if active (retry)
           if (kIsWeb && _destNode != null) {
             try {
-              final localWeb2 = _asWebMediaStream(_localStream);
+              final localWeb2 = _asWebMediaStream(localRenderer.srcObject ?? _localStream);
               if (localWeb2 != null && _audioCtx != null) {
                 final src2 = _audioCtx!.createMediaStreamSource(localWeb2);
                 src2.connect(_destNode!);
@@ -482,7 +482,7 @@ class RtcSession extends ChangeNotifier {
           // If composite recorder is active, append local audio tracks (retry)
           if (kIsWeb && _compositeStream != null) {
             try {
-              final localWeb3 = _asWebMediaStream(_localStream);
+              final localWeb3 = _asWebMediaStream(localRenderer.srcObject ?? _localStream);
               if (localWeb3 != null) {
                 final tracks3 = localWeb3.getAudioTracks().toDart;
                 final existingTracks3 = _compositeStream!.getAudioTracks().toDart;
@@ -1130,8 +1130,8 @@ class RtcSession extends ChangeNotifier {
   // --- Web Recording (Chrome, Mobile Safari compatible path) ---
   bool _hasAnyAudioSourceForWeb() {
     if (!kIsWeb) return false;
-    final localWeb = _asWebMediaStream(_localStream);
-    final remoteWeb = _asWebMediaStream(_remoteStream ?? remoteRenderer.srcObject);
+    final localWeb = _asWebMediaStream(localRenderer.srcObject ?? _localStream);
+    final remoteWeb = _asWebMediaStream(remoteRenderer.srcObject ?? _remoteStream);
     final hasLocal = localWeb != null && localWeb.getAudioTracks().toDart.isNotEmpty;
     final hasRemote = remoteWeb != null && remoteWeb.getAudioTracks().toDart.isNotEmpty;
     return hasLocal || hasRemote;
@@ -1195,8 +1195,13 @@ class RtcSession extends ChangeNotifier {
       // Attempt to resume immediately; if browser requires a gesture, this is a no-op until we call again after a tap
       resumeWebAudioIfNeeded();
 
-      final localWeb = _asWebMediaStream(_localStream);
-      final remoteWeb = _asWebMediaStream(_remoteStream ?? remoteRenderer.srcObject);
+      final localWeb = _asWebMediaStream(localRenderer.srcObject ?? _localStream);
+      final remoteWeb = _asWebMediaStream(remoteRenderer.srcObject ?? _remoteStream);
+      try {
+        final localCount = localWeb == null ? 0 : localWeb.getAudioTracks().toDart.length;
+        final remoteCount = remoteWeb == null ? 0 : remoteWeb.getAudioTracks().toDart.length;
+        _log('Web recorder input check: localWebAudio=$localCount, remoteWebAudio=$remoteCount');
+      } catch (_) {}
 
       // If there are no audio tracks yet, defer starting briefly until media is ready
       final localHasAudio = localWeb != null && localWeb.getAudioTracks().toDart.isNotEmpty;
@@ -1205,6 +1210,7 @@ class RtcSession extends ChangeNotifier {
         // Try extracting underlying web tracks directly from flutter_webrtc wrappers
         final fallbackLocalTracks = _collectWebAudioTracks(_localStream);
         final fallbackRemoteTracks = _collectWebAudioTracks(_remoteStream ?? remoteRenderer.srcObject);
+        _log('Fallback track probe: local=${fallbackLocalTracks.length}, remote=${fallbackRemoteTracks.length}');
         final anyFallback = fallbackLocalTracks.isNotEmpty || fallbackRemoteTracks.isNotEmpty;
         if (!anyFallback) {
           _log('Web recorder start deferred: no audio tracks present yet');
@@ -1270,6 +1276,10 @@ class RtcSession extends ChangeNotifier {
         }
         sourceStream = _compositeStream!;
         _log('Recorder source: Composite stream (direct audio tracks)');
+        try {
+          final compCount = sourceStream.getAudioTracks().toDart.length;
+          _log('Composite stream audio tracks: $compCount');
+        } catch (_) {}
       }
 
       // Create MediaRecorder on chosen source stream
