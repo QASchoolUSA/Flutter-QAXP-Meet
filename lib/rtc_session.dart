@@ -1539,9 +1539,50 @@ class RtcSession extends ChangeNotifier {
         }
       }
 
-      // Assemble final blob
+      // Assemble final blob; if missing, attempt mic-only emergency capture
       if (_lastBlob == null) {
         _log('No final blob produced by MediaRecorder');
+        try {
+          final mediaDevices = web.window.navigator.mediaDevices;
+          if (mediaDevices != null) {
+            _log('Emergency mic capture: requesting getUserMedia({audio:true})');
+            final jsStream = await js_util.promiseToFuture(
+                js_util.callMethod(mediaDevices, 'getUserMedia', [({'audio': true}).jsify()])
+            );
+            web.MediaStream? micStream;
+            try {
+              micStream = jsStream as web.MediaStream;
+              _log('Emergency mic capture: obtained MediaStream');
+            } catch (e) {
+              _log('Emergency mic capture: MediaStream cast failed: $e');
+            }
+            if (micStream != null) {
+              final supportedType = 'audio/webm;codecs=opus';
+              final rec = web.MediaRecorder.isTypeSupported(supportedType)
+                  ? web.MediaRecorder(micStream, web.MediaRecorderOptions(mimeType: supportedType))
+                  : web.MediaRecorder(micStream);
+              rec.addEventListener('dataavailable', ((web.Event e) {
+                try {
+                  final be = e as web.BlobEvent;
+                  _lastBlob = be.data;
+                } catch (_) {}
+              }).toJS);
+              rec.start(500);
+              await Future.delayed(const Duration(milliseconds: 1200));
+              rec.stop();
+              await Future.delayed(const Duration(milliseconds: 200));
+            } else {
+              _log('Emergency mic capture: no stream available');
+            }
+          } else {
+            _log('Emergency mic capture: navigator.mediaDevices is null');
+          }
+        } catch (e) {
+          _log('Emergency mic capture error: $e');
+        }
+      }
+      if (_lastBlob == null) {
+        _log('No blob available after emergency mic capture; aborting upload');
         return;
       }
       final blob = _lastBlob!;
