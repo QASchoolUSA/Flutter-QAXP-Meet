@@ -60,6 +60,7 @@ class RtcSession extends ChangeNotifier {
   double uploadProgress = 0.0; // 0.0..1.0
   String? recordingStatus; // human-readable state
   Uri? recordUploadUrl; // set by app for server upload
+  bool _webRecorderStartRetryScheduled = false; // throttle deferred starts
 
   // lightweight logger to surface messages in release builds and web console
   void _log(String message) {
@@ -1045,6 +1046,35 @@ class RtcSession extends ChangeNotifier {
     final hasRemote = remoteWeb != null && remoteWeb.getAudioTracks().toDart.isNotEmpty;
     return hasLocal || hasRemote;
   }
+  // Collect underlying web.MediaStreamTracks from flutter_webrtc tracks when direct MediaStream conversion fails
+  List<web.MediaStreamTrack> _collectWebAudioTracks(MediaStream? s) {
+    if (!kIsWeb || s == null) return const <web.MediaStreamTrack>[];
+    final out = <web.MediaStreamTrack>[];
+    try {
+      for (final t in s.getAudioTracks()) {
+        // Try common property used by flutter_webrtc web bindings
+        final jt = js_util.getProperty(t, 'jsTrack');
+        if (jt is web.MediaStreamTrack) {
+          out.add(jt);
+          continue;
+        }
+        // Alternative property names
+        final alt = js_util.getProperty(t, 'track');
+        if (alt is web.MediaStreamTrack) {
+          out.add(alt);
+          continue;
+        }
+        // Fallback: attempt dynamic cast
+        try {
+          final direct = t as dynamic;
+          if (direct is web.MediaStreamTrack) {
+            out.add(direct);
+          }
+        } catch (_) {}
+      }
+    } catch (_) {}
+    return out;
+  }
   // Convert flutter_webrtc MediaStream to web.MediaStream when on web
   web.MediaStream? _asWebMediaStream(MediaStream? s) {
     if (!kIsWeb) return null;
@@ -1082,22 +1112,32 @@ class RtcSession extends ChangeNotifier {
       final localHasAudio = localWeb != null && localWeb.getAudioTracks().toDart.isNotEmpty;
       final remoteHasAudio = remoteWeb != null && remoteWeb.getAudioTracks().toDart.isNotEmpty;
       if (!localHasAudio && !remoteHasAudio) {
-        _log('Web recorder start deferred: no audio tracks present yet');
-        // Single delayed retry to avoid starting on an empty stream
-        Future.delayed(const Duration(milliseconds: 500), () {
-          if (!isRecording) {
-            try {
-              startRecordingWeb(uploadUrl: uploadUrl, metadata: metadata);
-            } catch (_) {}
+        // Try extracting underlying web tracks directly from flutter_webrtc wrappers
+        final fallbackLocalTracks = _collectWebAudioTracks(_localStream);
+        final fallbackRemoteTracks = _collectWebAudioTracks(_remoteStream ?? remoteRenderer.srcObject);
+        final anyFallback = fallbackLocalTracks.isNotEmpty || fallbackRemoteTracks.isNotEmpty;
+        if (!anyFallback) {
+          _log('Web recorder start deferred: no audio tracks present yet');
+          if (!_webRecorderStartRetryScheduled) {
+            _webRecorderStartRetryScheduled = true;
+            // Single delayed retry to avoid starting on an empty stream
+            Future.delayed(const Duration(milliseconds: 500), () {
+              _webRecorderStartRetryScheduled = false;
+              if (!isRecording) {
+                try {
+                  startRecordingWeb(uploadUrl: uploadUrl, metadata: metadata);
+                } catch (_) {}
+              }
+            });
           }
-        });
-        return;
+          return;
+        }
       }
 
       // Choose source: WebAudio mix when running; else fallback to composite stream of tracks
       final bool audioCtxRunning = _audioCtx!.state == 'running';
       web.MediaStream? sourceStream;
-      if (audioCtxRunning) {
+      if (audioCtxRunning && (localWeb != null || remoteWeb != null)) {
         // Connect local audio
         if (localWeb != null) {
           final localSrc = _audioCtx!.createMediaStreamSource(localWeb);
@@ -1120,10 +1160,20 @@ class RtcSession extends ChangeNotifier {
           for (final t in tracks) {
             _compositeStream!.addTrack(t);
           }
+        } else {
+          final tracks = _collectWebAudioTracks(_localStream);
+          for (final t in tracks) {
+            _compositeStream!.addTrack(t);
+          }
         }
         // Add remote audio tracks
         if (remoteWeb != null) {
           final tracks = remoteWeb.getAudioTracks().toDart;
+          for (final t in tracks) {
+            _compositeStream!.addTrack(t);
+          }
+        } else {
+          final tracks = _collectWebAudioTracks(_remoteStream ?? remoteRenderer.srcObject);
           for (final t in tracks) {
             _compositeStream!.addTrack(t);
           }
@@ -1159,8 +1209,8 @@ class RtcSession extends ChangeNotifier {
         _log('MediaRecorder stopped');
       }).toJS);
 
-      // Start without timeslice to get a single full-session blob on stop
-      _webRecorder!.start();
+      // Use a timeslice so we can observe periodic dataavailable for diagnostics
+      _webRecorder!.start(1000);
     } catch (e) {
       // Silent error handling for background recording
       isRecording = false;
