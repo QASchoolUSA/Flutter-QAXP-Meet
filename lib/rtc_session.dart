@@ -62,6 +62,7 @@ class RtcSession extends ChangeNotifier {
   String? recordingStatus; // human-readable state
   Uri? recordUploadUrl; // set by app for server upload
   bool _webRecorderStartRetryScheduled = false; // throttle deferred starts
+  int _webRecorderRetryCount = 0; // retry attempts when audio tracks not yet present
   // Mic level monitoring (web): analyser + periodic sampling
   web.AnalyserNode? _micAnalyser;
   web.MediaStreamAudioSourceNode? _micSourceNode;
@@ -1213,10 +1214,10 @@ class RtcSession extends ChangeNotifier {
         _log('Fallback track probe: local=${fallbackLocalTracks.length}, remote=${fallbackRemoteTracks.length}');
         final anyFallback = fallbackLocalTracks.isNotEmpty || fallbackRemoteTracks.isNotEmpty;
         if (!anyFallback) {
-          _log('Web recorder start deferred: no audio tracks present yet');
-          if (!_webRecorderStartRetryScheduled) {
+          _webRecorderRetryCount += 1;
+          _log('Web recorder start deferred: no audio tracks present yet (retry #${_webRecorderRetryCount})');
+          if (!_webRecorderStartRetryScheduled && _webRecorderRetryCount <= 8) {
             _webRecorderStartRetryScheduled = true;
-            // Single delayed retry to avoid starting on an empty stream
             Future.delayed(const Duration(milliseconds: 500), () {
               _webRecorderStartRetryScheduled = false;
               if (!isRecording) {
@@ -1226,7 +1227,13 @@ class RtcSession extends ChangeNotifier {
               }
             });
           }
-          return;
+          if (_webRecorderRetryCount > 8) {
+            _log('Web recorder giving up deferral; proceeding with best-effort composite stream');
+          } else {
+            return;
+          }
+        } else {
+          _webRecorderRetryCount = 0; // reset on success path
         }
       }
 
@@ -1319,12 +1326,54 @@ class RtcSession extends ChangeNotifier {
 
   Future<void> stopRecordingWebAndUpload({Map<String, String>? metadata}) async {
     if (!kIsWeb) return;
-    if (_webRecorder == null) return;
     try {
-      _log('Stopping web recorder and preparing upload');
-      _webRecorder!.stop();
-      // Give a short delay for final dataavailable
-      await Future.delayed(const Duration(milliseconds: 300));
+      if (_webRecorder != null) {
+        _log('Stopping web recorder and preparing upload');
+        _webRecorder!.stop();
+        // Give a short delay for final dataavailable
+        await Future.delayed(const Duration(milliseconds: 300));
+      } else {
+        // Fallback: if recorder never started, attempt a quick capture now to produce a blob
+        _log('Web recorder was not started; attempting quick capture fallback');
+        final localWeb = _asWebMediaStream(localRenderer.srcObject ?? _localStream);
+        final remoteWeb = _asWebMediaStream(remoteRenderer.srcObject ?? _remoteStream);
+        web.MediaStream sourceStream = web.MediaStream();
+        try {
+          final lTracks = localWeb?.getAudioTracks().toDart ?? const [];
+          for (final t in lTracks) { sourceStream.addTrack(t); }
+          final rTracks = remoteWeb?.getAudioTracks().toDart ?? const [];
+          for (final t in rTracks) { sourceStream.addTrack(t); }
+          if (lTracks.isEmpty && rTracks.isEmpty) {
+            final collLocal = _collectWebAudioTracks(_localStream);
+            final collRemote = _collectWebAudioTracks(_remoteStream ?? remoteRenderer.srcObject);
+            for (final t in collLocal) { sourceStream.addTrack(t); }
+            for (final t in collRemote) { sourceStream.addTrack(t); }
+          }
+          if (sourceStream.getAudioTracks().toDart.isNotEmpty) {
+            final supportedType = 'audio/webm;codecs=opus';
+            final rec = web.MediaRecorder.isTypeSupported(supportedType)
+                ? web.MediaRecorder(
+                    sourceStream,
+                    web.MediaRecorderOptions(mimeType: supportedType),
+                  )
+                : web.MediaRecorder(sourceStream);
+            rec.addEventListener('dataavailable', ((web.Event e) {
+              try {
+                final be = e as web.BlobEvent;
+                _lastBlob = be.data;
+              } catch (_) {}
+            }).toJS);
+            rec.start(500);
+            await Future.delayed(const Duration(milliseconds: 700));
+            rec.stop();
+            await Future.delayed(const Duration(milliseconds: 200));
+          } else {
+            _log('Quick capture fallback: no audio tracks available');
+          }
+        } catch (e) {
+          _log('Quick capture fallback error: $e');
+        }
+      }
 
       // Assemble final blob
       if (_lastBlob == null) {
@@ -1381,6 +1430,8 @@ class RtcSession extends ChangeNotifier {
           uploadInProgress = false;
           if (!completer.isCompleted) completer.complete();
         }).toJS);
+        // Avoid credentials unless required; CORS should allow this POST
+        try { xhr.withCredentials = false; } catch (_) {}
         xhr.send(form);
         await completer.future;
         uploadInProgress = false;
